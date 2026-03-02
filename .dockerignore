@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+*.log
+.DS_Store
+# Service account key files — set GOOGLE_SERVICE_ACCOUNT_JSON on Railway instead
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json

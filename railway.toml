@@ -1,0 +1,7 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+# Railway will restart the process automatically on crash
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

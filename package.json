@@ -1,0 +1,22 @@
+{
+  "name": "businessbot",
+  "version": "1.0.0",
+  "description": "Telegram Business Customer Support AI Bot powered by Grammy + Groq",
+  "main": "dist/bot.js",
+  "scripts": {
+    "dev": "tsx watch src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^171.4.0",
+    "grammy": "^1.25.0",
+    "groq-sdk": "^0.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.3",
+    "typescript": "^5.4.5"
+  }
+}
