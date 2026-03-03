@@ -1,7 +1,5 @@
 import "dotenv/config";
 import { Bot, GrammyError, HttpError } from "grammy";
-import { loadConfig } from "./config.js";
-import { buildSystemPrompt } from "./prompt.js";
 import { chat, clearHistory, directKey, businessKey } from "./ai.js";
 import { upsertConnection, canReply, getOwnerUserId } from "./connections.js";
 import { findKeywordReply, isSheetsEnabled } from "./sheets.js";
@@ -12,6 +10,7 @@ import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
 import { generateLoginToken } from "./tokens.js";
 import { getOrProvisionUserSheet, isAdmin } from "./registry.js";
+import { getAdminPrompt, DEFAULT_SYSTEM_PROMPT, invalidatePromptCache } from "./adminPrompt.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -21,15 +20,9 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-let systemPrompt: string;
-try {
-  const config = loadConfig();
-  systemPrompt = buildSystemPrompt(config);
-  console.log("✅  Business config loaded.");
-} catch (err) {
-  console.error("❌  Failed to load config:", err);
-  process.exit(1);
-}
+// DEFAULT_SYSTEM_PROMPT is the platform-level fallback.
+// Each admin overrides this via their own Prompts sheet.
+console.log("✅  Bot starting — per-admin prompts loaded from Sheets at runtime.");
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -223,10 +216,21 @@ bot.on("business_message", async (ctx) => {
   // We log the owner's message as OUT (人工回复) for a complete chat history.
   const ownerUserId = getOwnerUserId(connectionId);
 
-  // ── Look up owner's per-user spreadsheet (multi-tenant) ────────────────────
+  // ── Look up admin's per-user spreadsheet (multi-tenant) ────────────────────
   const ownerSsId = ownerUserId !== undefined
     ? (await getOrProvisionUserSheet(ownerUserId) ?? "")
     : "";
+
+  // ── Only handle 1-on-1 private chats ────────────────────────────────────────
+  if (msg.chat.type !== "private") {
+    console.log(
+      `[business] ⏭️  Ignoring non-private chat type=${msg.chat.type}  conn=${connectionId}`
+    );
+    return;
+  }
+
+  // ── Load admin's custom system prompt ─────────────────────────────────────
+  const adminSystemPrompt = await getAdminPrompt(ownerSsId);
   if (msg.from && ownerUserId !== undefined && msg.from.id === ownerUserId) {
     console.log(
       `[business] 🙋  Owner manual reply  conn=${connectionId}  "${msg.text?.slice(0, 60) ?? "[non-text]"}"`
@@ -305,7 +309,7 @@ bot.on("business_message", async (ctx) => {
         return;
       }
       const gender = await detectGender(msg.chat);
-      const aiReply = await chat(key, `[语音转文字] ${transcription}`, withGenderCtx(systemPrompt, gender));
+      const aiReply = await chat(key, `[语音转文字] ${transcription}`, withGenderCtx(adminSystemPrompt, gender));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -328,7 +332,7 @@ bot.on("business_message", async (ctx) => {
         "如果有关，请给出有帮助的回应；如果看不懂客户意图，请礼貌询问客户想表达什么。" +
         "请用中英双语回答，语言自然简洁。";
       const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(systemPrompt, await detectGender(msg.chat)));
+      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -352,7 +356,7 @@ bot.on("business_message", async (ctx) => {
         "请判断视频内容是否与商业咨询相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。" +
         "请用中英双语回答。";
       const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(systemPrompt, await detectGender(msg.chat)));
+      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -467,7 +471,7 @@ bot.on("business_message", async (ctx) => {
 
     // ── Step 2: No keyword match — let AI handle the message ─────────────────
     const gender = await detectGender(msg.chat);
-    const aiReply = await chat(key, text, withGenderCtx(systemPrompt, gender));
+    const aiReply = await chat(key, text, withGenderCtx(adminSystemPrompt, gender));
     // Apply grace-period delay then re-check takeover before sending
     await sleep(BOT_REPLY_DELAY_MS);
     if (isHumanTakeover(connectionId, msg.chat.id)) {
@@ -707,6 +711,12 @@ bot.command("login", async (ctx) => {
 });
 
 bot.on("message:text", async (ctx) => {
+  // Private-only: reject group and channel messages
+  if (ctx.chat.type !== "private") return;
+
+  // Only registered admins can DM the bot directly
+  if (!(await requireAdmin(ctx))) return;
+
   if (isStaleMessageDate(ctx.message.date)) {
     console.log(
       `[startup-guard] ⏭ Skipped stale direct message  chat=${ctx.chat.id}  msgDate=${ctx.message.date}`
@@ -733,7 +743,7 @@ bot.on("message:text", async (ctx) => {
     }
 
     // ── Step 2: No keyword match — AI handles the message ────────────────────
-    const aiReply = await chat(key, text, systemPrompt);
+    const aiReply = await chat(key, text, DEFAULT_SYSTEM_PROMPT);
     await ctx.reply(aiReply);
   } catch (err) {
     console.error(`[direct] Error  chat=${ctx.chat.id}:`, err);
@@ -744,8 +754,8 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-bot.on("message", async (ctx) => {
-  await ctx.reply(
+bot.on("message", async (ctx) => {  // Only respond in private chats; silently ignore groups/channels
+  if (ctx.chat.type !== "private") return;  await ctx.reply(
     "抱歉，我目前只支持文字消息，请用文字描述您的需求。\n" +
       "Sorry, I only support text messages. Please describe your needs in text."
   );

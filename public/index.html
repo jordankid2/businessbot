@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-  <title>关键词管理 · zznet Bot</title>
+  <title>Bot 管理 · zznet Bot</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
@@ -177,6 +177,59 @@
     }
     .bottom-bar .btn { flex: 1; }
 
+    /* ── Tab bar ───────────────────────────────────────────────────────────── */
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .tab-bar button {
+      flex: 1; padding: 11px 8px;
+      background: none; border: none; border-bottom: 2.5px solid transparent;
+      font-size: 14px; font-weight: 600; color: var(--hint);
+      cursor: pointer; transition: color .15s, border-color .15s;
+    }
+    .tab-bar button.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ── Prompt editor ───────────────────────────────────────────────────────── */
+    .prompt-section {
+      padding: 16px;
+    }
+    .prompt-label {
+      font-size: 12px; font-weight: 600; color: var(--hint);
+      margin-bottom: 8px; display: block; text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    #prompt-textarea {
+      width: 100%;
+      min-height: 260px;
+      background: var(--section-bg);
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 13px;
+      font-family: inherit;
+      color: var(--text);
+      resize: vertical;
+      outline: none;
+      line-height: 1.5;
+      transition: border-color .15s;
+    }
+    #prompt-textarea:focus {
+      border-color: var(--accent);
+    }
+    .prompt-hint {
+      font-size: 11px; color: var(--hint);
+      margin-top: 8px; line-height: 1.6;
+    }
+
     /* ── Spreadsheet link chip ───────────────────────────────────────────── */
     .ss-chip {
       display: inline-flex; align-items: center; gap: 4px;
@@ -204,7 +257,7 @@
 <!-- Main app -->
 <div id="app">
   <div class="header">
-    <h1>关键词管理</h1>
+    <h1>zznet Bot 管理</h1>
     <div class="header-sub">
       <span id="user-label"></span>
       <a id="ss-link" class="ss-chip" href="#" target="_blank" style="display:none">
@@ -213,33 +266,61 @@
     </div>
   </div>
 
-  <div class="toolbar">
-    <button class="btn btn-outline btn-sm" onclick="addRow()">＋ 添加关键词</button>
-    <div class="spacer"></div>
-    <button class="btn btn-outline btn-sm" onclick="loadKeywords()">↺ 刷新</button>
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button id="tab-kw-btn" class="active" onclick="switchTab('kw')">🔑 关键词</button>
+    <button id="tab-prompt-btn" onclick="switchTab('prompt')">🤖 AI Prompt</button>
   </div>
 
-  <div id="status-bar"></div>
+  <!-- ── Keywords tab ── -->
+  <div id="tab-kw" class="tab-panel active">
+    <div class="toolbar">
+      <button class="btn btn-outline btn-sm" onclick="addRow()">＋ 添加关键词</button>
+      <div class="spacer"></div>
+      <button class="btn btn-outline btn-sm" onclick="loadKeywords()">↺ 刷新</button>
+    </div>
 
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th class="col-kw">关键词</th>
-          <th class="col-reply">自动回复内容</th>
-          <th class="col-audio">语音URL（可选）</th>
-          <th class="col-notes">备注</th>
-          <th class="col-del"></th>
-        </tr>
-      </thead>
-      <tbody id="kw-body">
-        <tr id="empty-row"><td colspan="5">暂无关键词，点击「添加」开始设置</td></tr>
-      </tbody>
-    </table>
+    <div id="status-bar"></div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-kw">关键词</th>
+            <th class="col-reply">自动回复内容</th>
+            <th class="col-audio">语音URL（可选）</th>
+            <th class="col-notes">备注</th>
+            <th class="col-del"></th>
+          </tr>
+        </thead>
+        <tbody id="kw-body">
+          <tr id="empty-row"><td colspan="5">暂无关键词，点击「添加」开始设置</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bottom-bar">
+      <button class="btn btn-primary" onclick="saveKeywords()">💾 保存关键词</button>
+    </div>
   </div>
 
-  <div class="bottom-bar">
-    <button class="btn btn-primary" onclick="saveKeywords()">💾 保存更改</button>
+  <!-- ── Prompt tab ── -->
+  <div id="tab-prompt" class="tab-panel">
+    <div class="prompt-section">
+      <label class="prompt-label" for="prompt-textarea">系统提示词（System Prompt）</label>
+      <textarea id="prompt-textarea" placeholder="在此输入 AI 的角色设定、行为规则和回复风格…"></textarea>
+      <div class="prompt-hint">
+        此提示词会作为 AI 的系统指令，决定机器人的性格与回答方式。<br>
+        留空则使用平台默认提示词。
+      </div>
+    </div>
+
+    <div id="prompt-status-bar" style="font-size:12px;padding:4px 16px;color:var(--hint);min-height:22px;"></div>
+
+    <div class="bottom-bar">
+      <button class="btn btn-outline" onclick="loadPrompt()">↺ 刷新</button>
+      <button class="btn btn-primary" onclick="savePrompt()">💾 保存 Prompt</button>
+    </div>
   </div>
 </div>
 
@@ -255,6 +336,17 @@
 
   let _ssId   = "";
   let _saving = false;
+  let _savingPrompt = false;
+
+  // ── Tab switching ──────────────────────────────────────────────────────────
+
+  window.switchTab = function (tab) {
+    const tabs = ["kw", "prompt"];
+    tabs.forEach(t => {
+      document.getElementById(`tab-${t}`).classList.toggle("active", t === tab);
+      document.getElementById(`tab-${t}-btn`).classList.toggle("active", t === tab);
+    });
+  };
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -313,7 +405,7 @@
       hide("loading");
       show("app");
 
-      await loadKeywords();
+      await Promise.all([loadKeywords(), loadPrompt()]);
     } catch (err) {
       showError("网络错误，请稍后重试。\n" + (err?.message ?? ""));
     }
@@ -448,6 +540,53 @@
   // Expose to HTML onclick
   window.loadKeywords  = loadKeywords;
   window.saveKeywords  = saveKeywords;
+
+  // ── Prompt API ─────────────────────────────────────────────────────────────
+
+  function setPromptStatus(msg, type) {
+    const bar = document.getElementById("prompt-status-bar");
+    bar.textContent = msg;
+    bar.style.color = type === "ok" ? "#22a06b" : type === "error" ? "#e53e3e" : "var(--hint)";
+  }
+
+  async function loadPrompt() {
+    if (!_ssId) { setPromptStatus("未找到电子表格", "error"); return; }
+    setPromptStatus("加载中…");
+    try {
+      const res  = await fetch(`/api/prompt?ssId=${encodeURIComponent(_ssId)}`);
+      const data = await res.json();
+      if (!res.ok) { setPromptStatus(data.error ?? "加载失败", "error"); return; }
+      document.getElementById("prompt-textarea").value = data.prompt ?? "";
+      setPromptStatus(data.prompt ? "已加载 Prompt" : "暂无自定义 Prompt，留空使用平台默认", "ok");
+    } catch (err) {
+      setPromptStatus("网络错误：" + (err?.message ?? ""), "error");
+    }
+  }
+
+  async function savePrompt() {
+    if (!_ssId)         { setPromptStatus("未找到电子表格", "error"); return; }
+    if (_savingPrompt)  { return; }
+    _savingPrompt = true;
+    setPromptStatus("保存中…");
+    const prompt = document.getElementById("prompt-textarea").value.trim();
+    try {
+      const res  = await fetch("/api/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssId: _ssId, prompt }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setPromptStatus(data.error ?? "保存失败", "error"); }
+      else         { setPromptStatus("✅ Prompt 已保存", "ok"); }
+    } catch (err) {
+      setPromptStatus("网络错误：" + (err?.message ?? ""), "error");
+    } finally {
+      _savingPrompt = false;
+    }
+  }
+
+  window.loadPrompt  = loadPrompt;
+  window.savePrompt  = savePrompt;
 
   // ── Boot ───────────────────────────────────────────────────────────────────
   authenticate();

@@ -121,16 +121,17 @@ async function provisionSpreadsheet(
 ): Promise<string> {
   const auth = getGoogleAuth()!;
   const api   = google.sheets({ version: "v4", auth });
-  const title = `zznet Keywords — ${firstName || username || String(userId)}`;
+  const title = `zznet Bot — ${firstName || username || String(userId)}`;
 
-  // 1. Create spreadsheet with 3 sheets
+  // 1. Create spreadsheet with 4 sheets
   const created = await api.spreadsheets.create({
     requestBody: {
       properties: { title },
       sheets: [
         { properties: { title: "Keywords", index: 0 } },
-        { properties: { title: "Logs",     index: 1 } },
-        { properties: { title: "Users",    index: 2 } },
+        { properties: { title: "Prompts",  index: 1 } },
+        { properties: { title: "Logs",     index: 2 } },
+        { properties: { title: "Users",    index: 3 } },
       ],
     },
   });
@@ -138,7 +139,7 @@ async function provisionSpreadsheet(
   const ssId  = created.data.spreadsheetId!;
   const ssUrl = `https://docs.google.com/spreadsheets/d/${ssId}`;
 
-  // 2. Write headers
+  // 2. Write headers + default rows
   await api.spreadsheets.values.batchUpdate({
     spreadsheetId: ssId,
     requestBody: {
@@ -149,13 +150,23 @@ async function provisionSpreadsheet(
           values: [["Keywords (comma-separated)", "Reply Text", "Audio URL (optional)", "Notes"]],
         },
         {
+          // Prompts sheet: Setting | Value
+          // Admins fill in "system_prompt" row with their custom AI persona
+          range: "Prompts!A1:B2",
+          values: [
+            ["Setting", "Value"],
+            ["system_prompt", ""],   // admin fills this in via Mini App or directly
+          ],
+        },
+        {
           range: "Logs!A1:G1",
           values: [["Timestamp", "Direction", "Customer ID", "Customer Name",
                     "Connection ID", "Message", "Reply Type"]],
         },
         {
-          range: "Users!A1:F1",
-          values: [["Customer ID", "Name", "Gender", "First Seen", "Last Seen", "Messages"]],
+          // Users sheet: platform tracks admins here (not end-customers)
+          range: "Users!A1:E1",
+          values: [["Admin User ID", "Username", "First Name", "Connected At", "Notes"]],
         },
       ],
     },

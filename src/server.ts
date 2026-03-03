@@ -2,13 +2,11 @@
  * Mini App Web Server
  *
  * Serves the Telegram Mini App UI and provides API endpoints for:
- *  - POST /api/auth       — verify Telegram initData, return user + spreadsheet info
- *  - GET  /api/keywords   — fetch keyword rows from owner's spreadsheet
- *  - POST /api/keywords   — overwrite keyword rows in owner's spreadsheet
- *
- * Auth uses Telegram's HMAC-SHA256 initData verification:
- *   secretKey = HMAC-SHA256("WebAppData", botToken)
- *   expected  = HMAC-SHA256(secretKey, checkString)   where checkString = sorted key=value pairs (no hash)
+ *  - POST /api/auth        — verify Telegram initData, return user + spreadsheet info
+ *  - GET  /api/keywords    — fetch keyword rows from admin's spreadsheet
+ *  - POST /api/keywords    — overwrite keyword rows in admin's spreadsheet
+ *  - GET  /api/prompt      — fetch admin's custom system prompt
+ *  - POST /api/prompt      — save admin's custom system prompt
  */
 
 import express from "express";
@@ -19,8 +17,10 @@ import { google } from "googleapis";
 import { getGoogleAuth } from "./gauth.js";
 import { getOrProvisionUserSheet } from "./registry.js";
 import { invalidateCache } from "./sheets.js";
+import { invalidatePromptCache } from "./adminPrompt.js";
 
 const KEYWORDS_SHEET = "Keywords";
+const PROMPTS_SHEET  = "Prompts";
 
 // ─── initData verification ────────────────────────────────────────────────────
 
@@ -196,6 +196,69 @@ export function startServer(): void {
     } catch (err) {
       console.error("[server] POST /api/keywords error:", err);
       res.status(500).json({ error: "Failed to save keywords to Sheets" });
+    }
+  });
+
+  // ── GET /api/prompt?ssId=xxx ──────────────────────────────────────────────────────
+  app.get("/api/prompt", async (req, res) => {
+    const ssId = String(req.query["ssId"] ?? "");
+    if (!ssId) { res.status(400).json({ error: "Missing ssId" }); return; }
+
+    const auth = getGoogleAuth();
+    if (!auth) { res.status(503).json({ error: "Google Sheets not configured" }); return; }
+
+    try {
+      const sheets = google.sheets({ version: "v4", auth });
+      const result = await sheets.spreadsheets.values.get({
+        spreadsheetId: ssId,
+        range: `${PROMPTS_SHEET}!A2:B`,
+      });
+
+      let prompt = "";
+      for (const row of (result.data.values ?? [])) {
+        if (String(row[0] ?? "").trim().toLowerCase() === "system_prompt") {
+          prompt = String(row[1] ?? "").trim();
+          break;
+        }
+      }
+
+      res.json({ prompt });
+    } catch (err) {
+      console.error("[server] GET /api/prompt error:", err);
+      res.status(500).json({ error: "Failed to fetch prompt" });
+    }
+  });
+
+  // ── POST /api/prompt ───────────────────────────────────────────────────────────
+  app.post("/api/prompt", async (req, res) => {
+    const { ssId, prompt } = (req.body ?? {}) as { ssId?: string; prompt?: string };
+
+    if (!ssId || prompt === undefined) {
+      res.status(400).json({ error: "Missing ssId or prompt in request body" });
+      return;
+    }
+
+    const auth = getGoogleAuth();
+    if (!auth) { res.status(503).json({ error: "Google Sheets not configured" }); return; }
+
+    try {
+      const sheets = google.sheets({ version: "v4", auth });
+
+      // Upsert the system_prompt row (always row 2)
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: ssId,
+        range: `${PROMPTS_SHEET}!A2:B2`,
+        valueInputOption: "RAW",
+        requestBody: { values: [["system_prompt", prompt]] },
+      });
+
+      // Invalidate cached prompt so next AI call uses the new value
+      invalidatePromptCache(ssId);
+
+      res.json({ ok: true });
+    } catch (err) {
+      console.error("[server] POST /api/prompt error:", err);
+      res.status(500).json({ error: "Failed to save prompt" });
     }
   });
 
