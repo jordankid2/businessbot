@@ -46,11 +46,151 @@ function doGet(e) {
 // ─── Script Properties helpers ────────────────────────────────────────────────
 
 function getBotToken_() {
-  return PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '8657904700:AAFP7QDz9loBoiYXXsyzRuis456doNNxPm4';
+  return PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '';
 }
 
 function getBotUsername_() {
-  return PropertiesService.getScriptProperties().getProperty('BOT_USERNAME') || 'auto_csbot';
+  return PropertiesService.getScriptProperties().getProperty('BOT_USERNAME') || '';
+}
+
+// ─── Spreadsheet Menu ─────────────────────────────────────────────────────────
+
+/**
+ * Runs automatically when the spreadsheet is opened.
+ * Adds the "🤖 OpenClaw Bot" menu to the spreadsheet toolbar.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🤖 OpenClaw Bot')
+    .addItem('🔑 Set Bot Token', 'menuSetBotToken')
+    .addItem('👤 Set Bot Username', 'menuSetBotUsername')
+    .addSeparator()
+    .addItem('🌐 Get Web App URL', 'menuShowWebAppUrl')
+    .addItem('⚙️ Check Config Status', 'menuCheckConfig')
+    .addSeparator()
+    .addItem('📋 List All Customers', 'menuListCustomers')
+    .addItem('🗑️ Delete a Customer Record', 'menuDeleteCustomer')
+    .addToUi();
+}
+
+// ─── Menu action helpers ──────────────────────────────────────────────────────
+
+function menuSetBotToken() {
+  const ui = SpreadsheetApp.getUi();
+  const current = getBotToken_();
+  const hint = current ? '(currently set — paste new token to replace)' : '(not set yet)';
+  const resp = ui.prompt(
+    '🔑 Bot Token',
+    'Paste the token from @BotFather ' + hint + ':\n\nFormat: 123456:ABC-DEF...',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const token = resp.getResponseText().trim();
+  if (!token) { ui.alert('No token entered — nothing saved.'); return; }
+  if (!token.match(/^\d+:[A-Za-z0-9_-]{35,}$/)) {
+    ui.alert('⚠️ That doesn\'t look like a valid Telegram bot token.\n\nExpected format: 123456789:ABCdef...\n\nPlease check and try again.');
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty('BOT_TOKEN', token);
+  ui.alert('✅ Bot token saved successfully!');
+}
+
+function menuSetBotUsername() {
+  const ui = SpreadsheetApp.getUi();
+  const current = getBotUsername_();
+  const hint = current ? '(currently: @' + current + ')' : '(not set yet)';
+  const resp = ui.prompt(
+    '👤 Bot Username',
+    'Enter your bot\'s Telegram username ' + hint + ':\n\n(without the @ sign, e.g. my_bot)',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const username = resp.getResponseText().trim().replace(/^@/, '');
+  if (!username) { ui.alert('No username entered — nothing saved.'); return; }
+  PropertiesService.getScriptProperties().setProperty('BOT_USERNAME', username);
+  ui.alert('✅ Bot username saved: @' + username);
+}
+
+function menuShowWebAppUrl() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const url = ScriptApp.getService().getUrl();
+    if (!url) {
+      ui.alert('⚠️ Web App Not Deployed',
+        'This script has not been deployed as a Web App yet.\n\n' +
+        'Go to: Deploy → New deployment → Web App\n' +
+        'Execute as: Me | Who has access: Anyone',
+        ui.ButtonSet.OK);
+      return;
+    }
+    ui.alert('🌐 Web App URL',
+      'Your login page URL is:\n\n' + url + '\n\n' +
+      'Register this domain in @BotFather:\n/mybots → your bot → Bot Settings → Domain',
+      ui.ButtonSet.OK);
+  } catch (e) {
+    ui.alert('⚠️ Could not read URL: ' + e.message);
+  }
+}
+
+function menuCheckConfig() {
+  const ui = SpreadsheetApp.getUi();
+  const token = getBotToken_();
+  const username = getBotUsername_();
+  let webUrl = '';
+  try { webUrl = ScriptApp.getService().getUrl() || ''; } catch (e) { webUrl = '(error reading URL)'; }
+
+  const tokenStatus = token ? '✅ Set (' + token.split(':')[0] + ':***)' : '❌ Not set';
+  const usernameStatus = username ? '✅ @' + username : '❌ Not set';
+  const urlStatus = webUrl ? '✅ Deployed' : '❌ Not deployed';
+
+  let msg = '⚙️ OpenClaw Bot Configuration\n\n';
+  msg += 'Bot Token:    ' + tokenStatus + '\n';
+  msg += 'Bot Username: ' + usernameStatus + '\n';
+  msg += 'Web App URL:  ' + urlStatus + '\n';
+  if (webUrl) msg += '\n' + webUrl;
+
+  const allGood = token && username && webUrl;
+  msg += '\n\n' + (allGood ? '✅ All settings configured! Your login page is ready.' : '⚠️ Please complete the missing settings above.');
+
+  ui.alert('ℹ️ Config Status', msg, ui.ButtonSet.OK);
+}
+
+function menuListCustomers() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = getMasterSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) { ui.alert('No customers yet.'); return; }
+  const rows = data.slice(1).map((r, i) =>
+    (i + 1) + '. ' + (r[2] || r[1] || 'Unknown') + ' (ID: ' + r[0] + ') — ' + (r[3] || 'no email')
+  );
+  const preview = rows.slice(0, 15).join('\n');
+  const more = rows.length > 15 ? '\n\n... and ' + (rows.length - 15) + ' more. See the Customers sheet for the full list.' : '';
+  ui.alert('📋 Customers (' + (data.length - 1) + ' total)', preview + more, ui.ButtonSet.OK);
+}
+
+function menuDeleteCustomer() {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt(
+    '🗑️ Delete Customer',
+    'Enter the Telegram User ID of the customer record to delete:',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const telegramId = resp.getResponseText().trim();
+  if (!telegramId) { ui.alert('No ID entered.'); return; }
+
+  const found = findCustomer_(telegramId);
+  if (!found) { ui.alert('❌ Customer ID ' + telegramId + ' not found in the Customers sheet.'); return; }
+
+  const confirm = ui.alert(
+    'Confirm Delete',
+    'Delete record for: ' + (found.row[2] || found.row[1] || 'Unknown') + ' (ID: ' + telegramId + ')?\n\nThis does NOT delete their spreadsheet.',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  getMasterSheet_().deleteRow(found.rowIndex);
+  ui.alert('✅ Customer record deleted. Their spreadsheet is unaffected.');
 }
 
 // ─── Telegram auth verification ───────────────────────────────────────────────
