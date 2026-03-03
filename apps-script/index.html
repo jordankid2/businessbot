@@ -238,7 +238,9 @@
                First login creates a dedicated spreadsheet shared to this email.</small>
       </div>
 
-      <!-- Telegram Login Widget — replace BOT_USERNAME with your bot's username -->
+      <!-- Telegram Login Widget
+           BotFather /setdomain must be set to exactly: script.google.com
+           (no https://, no path, no trailing slash) -->
       <div id="telegram-login-wrap">
         <script
           async
@@ -247,14 +249,14 @@
           data-size="large"
           data-userpic="true"
           data-lang="zh"
-          data-auth-url="<?= ScriptApp.getService().getUrl() ?>"
+          data-onauth="onTelegramAuth(user)"
           data-request-access="write">
         </script>
       </div>
 
       <p style="margin-top:16px; font-size:12px; color:#999;">
-        ⓘ 点击按钮后 Telegram 将验证您的身份并重定向回此页面。<br>
-        Telegram will verify your identity and redirect back to this page.
+        ⓘ 点击按钮后 Telegram 将在此页面直接验证您的身份。<br>
+        Telegram will verify your identity directly on this page.
       </p>
     </div>
   </div>
@@ -312,27 +314,14 @@
   let currentSpreadsheetId = null;
   let rowCounter = 0;
 
-  // ─── Parse Telegram login redirect params ──────────────────────────────────
-  (function initFromTelegramCallback() {
-    const params = new URLSearchParams(window.location.search);
-    const id   = params.get('id');
-    const hash = params.get('hash');
-    if (!id || !hash) return; // Not a Telegram callback
+  // ─── Telegram widget callback (data-onauth mode) ──────────────────────────
+  // Called directly by the Telegram widget JS — no page redirect required.
+  function onTelegramAuth(user) {
+    const email = (document.getElementById('emailInput')?.value || '').trim();
+    handleTelegramLogin(user, email);
+  }
 
-    // Collect all Telegram auth params
-    const authData = {};
-    for (const [k, v] of params.entries()) authData[k] = v;
-
-    const email = sessionStorage.getItem('pendingEmail') || '';
-    handleTelegramLogin(authData, email);
-  })();
-
-  // Store the email in sessionStorage before the Telegram redirect
-  document.getElementById('emailInput')?.addEventListener('change', function() {
-    sessionStorage.setItem('pendingEmail', this.value.trim());
-  });
-
-  // ─── Called after Telegram auth redirect ──────────────────────────────────
+  // ─── Called after Telegram auth ───────────────────────────────────────────
   function handleTelegramLogin(authData, email) {
     showStatus('info', '⏳ 正在验证身份 / Verifying identity…');
 
