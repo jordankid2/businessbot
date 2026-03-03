@@ -36,7 +36,7 @@ function doGet(e) {
   template.page = page;
   template.botUsername = getBotUsername_();
   template.userId = e.parameter.id || '';
-  template.authData = JSON.stringify(e.parameters); // pass all Telegram auth params
+  template.loginToken = e.parameter.token || ''; // one-time token login flow
   return template.evaluate()
     .setTitle('zznet — Keyword Manager')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
@@ -51,6 +51,10 @@ function getBotToken_() {
 
 function getBotUsername_() {
   return PropertiesService.getScriptProperties().getProperty('BOT_USERNAME') || '';
+}
+
+function getBotSpreadsheetId_() {
+  return PropertiesService.getScriptProperties().getProperty('BOT_SPREADSHEET_ID') || '';
 }
 
 // ─── Spreadsheet Menu ─────────────────────────────────────────────────────────
@@ -70,6 +74,8 @@ function onOpen() {
     .addSeparator()
     .addItem('📋 List All Customers', 'menuListCustomers')
     .addItem('🗑️ Delete a Customer Record', 'menuDeleteCustomer')
+    .addSeparator()
+    .addItem('🔗 Set Bot Spreadsheet ID', 'menuSetBotSpreadsheetId')
     .addToUi();
 }
 
@@ -111,6 +117,33 @@ function menuSetBotUsername() {
   ui.alert('✅ Bot username saved: @' + username);
 }
 
+function menuSetBotSpreadsheetId() {
+  const ui = SpreadsheetApp.getUi();
+  const current = getBotSpreadsheetId_();
+  const hint = current ? '(currently set)' : '(not set yet)';
+  const resp = ui.prompt(
+    '🔗 Bot Spreadsheet ID',
+    'Paste the Google Spreadsheet ID that the bot writes to ' + hint + ':\n\n' +
+    'This is the value of GOOGLE_SPREADSHEET_ID in your Railway env vars.\n' +
+    'Format: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const ssId = resp.getResponseText().trim();
+  if (!ssId) { ui.alert('No ID entered — nothing saved.'); return; }
+  // Quick sanity check: try to open it
+  try {
+    SpreadsheetApp.openById(ssId);
+  } catch (e) {
+    ui.alert('⚠️ Cannot open that spreadsheet.\n\nMake sure:\n' +
+      '1. The ID is correct\n' +
+      '2. You have shared that spreadsheet with your Google account (the one running this script)');
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty('BOT_SPREADSHEET_ID', ssId);
+  ui.alert('✅ Bot Spreadsheet ID saved!\n\nCustomers can now use /login in Telegram to get a one-time login link.');
+}
+
 function menuShowWebAppUrl() {
   const ui = SpreadsheetApp.getUi();
   try {
@@ -136,21 +169,24 @@ function menuCheckConfig() {
   const ui = SpreadsheetApp.getUi();
   const token = getBotToken_();
   const username = getBotUsername_();
+  const botSsId = getBotSpreadsheetId_();
   let webUrl = '';
   try { webUrl = ScriptApp.getService().getUrl() || ''; } catch (e) { webUrl = '(error reading URL)'; }
 
-  const tokenStatus = token ? '✅ Set (' + token.split(':')[0] + ':***)' : '❌ Not set';
+  const tokenStatus  = token   ? '✅ Set (' + token.split(':')[0] + ':***)' : '❌ Not set';
   const usernameStatus = username ? '✅ @' + username : '❌ Not set';
-  const urlStatus = webUrl ? '✅ Deployed' : '❌ Not deployed';
+  const urlStatus    = webUrl  ? '✅ Deployed'  : '❌ Not deployed';
+  const ssIdStatus   = botSsId ? '✅ Set'        : '❌ Not set';
 
   let msg = '⚙️ zznet Bot Configuration\n\n';
-  msg += 'Bot Token:    ' + tokenStatus + '\n';
-  msg += 'Bot Username: ' + usernameStatus + '\n';
-  msg += 'Web App URL:  ' + urlStatus + '\n';
-  if (webUrl) msg += '\n' + webUrl;
+  msg += 'Bot Token:       ' + tokenStatus + '\n';
+  msg += 'Bot Username:    ' + usernameStatus + '\n';
+  msg += 'Web App URL:     ' + urlStatus + '\n';
+  msg += 'Bot Spreadsheet: ' + ssIdStatus + ' ← needed for /login';
+  if (webUrl) msg += '\n\n' + webUrl;
 
-  const allGood = token && username && webUrl;
-  msg += '\n\n' + (allGood ? '✅ All settings configured! Your login page is ready.' : '⚠️ Please complete the missing settings above.');
+  const allGood = token && username && webUrl && botSsId;
+  msg += '\n\n' + (allGood ? '✅ All settings configured! /login command ready.' : '⚠️ Please complete the missing settings above.');
 
   ui.alert('ℹ️ Config Status', msg, ui.ButtonSet.OK);
 }
@@ -460,6 +496,88 @@ function saveKeywords(spreadsheetId, rows) {
     return { ok: false, error: 'Could not save keywords: ' + err.message };
   }
 }
+
+// ─── One-time token login ──────────────────────────────────────────────────────
+
+/**
+ * Verify a one-time login token written by the bot to the LoginTokens sheet.
+ * Marks the token as used on success so it cannot be reused.
+ *
+ * @param {string} token
+ * @returns {{ ok, telegramId, firstName, username, error }}
+ */
+function verifyToken_(token) {
+  const botSsId = getBotSpreadsheetId_();
+  if (!botSsId) {
+    return { ok: false, error: '请先在菜单中设置 Bot Spreadsheet ID。\nAdmin: set BOT_SPREADSHEET_ID via the menu (🔗).' };
+  }
+  if (!token || token.length < 10) return { ok: false, error: 'Invalid token.' };
+
+  let ss;
+  try {
+    ss = SpreadsheetApp.openById(botSsId);
+  } catch (e) {
+    return { ok: false, error: '无法访问 Bot Spreadsheet。请检查 BOT_SPREADSHEET_ID 及共享权限。\nCannot access bot spreadsheet. Check ID and sharing.' };
+  }
+
+  const sheet = ss.getSheetByName('LoginTokens');
+  if (!sheet) return { ok: false, error: 'LoginTokens sheet not found. Make sure a customer has used /login at least once.' };
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const [rowToken, telegramId, firstName, username, expiresAt, used] = data[i];
+    if (String(rowToken) !== String(token)) continue;
+    if (String(used).toUpperCase() === 'TRUE') {
+      return { ok: false, error: '此链接已使用。请重新发送 /login 获取新链接。\nLink already used. Send /login again.' };
+    }
+    if (new Date(expiresAt) < new Date()) {
+      return { ok: false, error: '链接已过期（10 分钟有效）。请重新发送 /login。\nLink expired (10 min). Send /login again.' };
+    }
+    sheet.getRange(i + 1, 6).setValue('TRUE');
+    return {
+      ok: true,
+      telegramId: String(telegramId),
+      firstName:  String(firstName  || ''),
+      username:   String(username   || ''),
+    };
+  }
+  return { ok: false, error: '无效登录链接。\nInvalid login link.' };
+}
+
+/**
+ * Token-based login: verify the one-time token and return spreadsheet info.
+ * Called via google.script.run.loginByToken(token) from the web app.
+ *
+ * @param {string} token
+ * @returns {{ ok, isNew, spreadsheetId, spreadsheetUrl, firstName, error }}
+ */
+function loginByToken(token) {
+  try {
+    const v = verifyToken_(token);
+    if (!v.ok) return { ok: false, error: v.error };
+
+    const existing = findCustomer_(v.telegramId);
+    if (existing) {
+      return {
+        ok: true,
+        isNew: false,
+        spreadsheetId:  existing.row[4],
+        spreadsheetUrl: existing.row[5],
+        firstName: v.firstName || v.username,
+      };
+    }
+
+    const { spreadsheetId, spreadsheetUrl } = provisionSpreadsheet_(
+      v.telegramId, v.username, v.firstName, ''
+    );
+    return { ok: true, isNew: true, spreadsheetId, spreadsheetUrl, firstName: v.firstName || v.username };
+  } catch (err) {
+    Logger.log('[loginByToken] Error: ' + err);
+    return { ok: false, error: 'Server error: ' + err.message };
+  }
+}
+
+// ─── HTML template include ───────────────────────────────────────────────
 
 /**
  * Helper to include sub-HTML files (for HtmlService template partials).

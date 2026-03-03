@@ -10,6 +10,7 @@ import { transcribeVoice, analyzePhoto, analyzeVideo, assessFileRisk } from "./m
 import { detectAndLogGender } from "./gender.js";
 import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
+import { generateLoginToken } from "./tokens.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -610,12 +611,51 @@ bot.command("help", async (ctx) => {
     "🤖 *zznet 客服机器人 / Support Bot*\n\n" +
       "• 直接发送消息提问 / Just send a message to ask\n" +
       "• /reset — 清除对话历史 / Clear conversation history\n" +
+      "• /login — 获取关键词管理登录链接 / Get keyword manager login link\n" +
       "• /help — 显示此帮助 / Show this help\n\n" +
       "💼 *Telegram Business 连接方式：*\n" +
       "设置 → Telegram Business → 聊天机器人\n" +
       "Settings → Telegram Business → Chatbots",
     { parse_mode: "Markdown" }
   );
+});
+
+bot.command("login", async (ctx) => {
+  const gasUrl = process.env.GAS_WEB_APP_URL?.trim();
+  if (!gasUrl) {
+    await ctx.reply(
+      "⚠️ 关键词管理页面尚未配置，请联系管理员。\n" +
+      "Keyword manager is not configured yet."
+    );
+    return;
+  }
+
+  const user = ctx.from;
+  if (!user) return;
+
+  try {
+    const token = await generateLoginToken(
+      user.id,
+      user.first_name ?? "",
+      user.username  ?? ""
+    );
+    const link = `${gasUrl}?token=${token}`;
+    await ctx.reply(
+      "🔗 *关键词管理登录链接*\n\n" +
+      "点击下方链接直接登录关键词管理页面\n" +
+      "（链接 *10 分钟内有效*，仅限使用一次）：\n\n" +
+      link + "\n\n" +
+      "⚠️ 请勿将此链接分享给他人。\n" +
+      "_One\-time link, valid for 10 min\. Do not share\._",
+      { parse_mode: "MarkdownV2" }
+    );
+  } catch (err) {
+    console.error("[login] Failed to generate token:", err);
+    await ctx.reply(
+      "⚠️ 无法生成登录链接，请稍后再试。\n" +
+      "Could not generate login link. Please try again."
+    );
+  }
 });
 
 bot.on("message:text", async (ctx) => {

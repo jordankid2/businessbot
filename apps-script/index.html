@@ -314,43 +314,61 @@
   let currentSpreadsheetId = null;
   let rowCounter = 0;
 
+  // ─── Shared login result handler ──────────────────────────────────────────
+  // Used by both the Telegram widget flow and the one-time token flow.
+  function handleLoginResult(result) {
+    if (!result.ok) {
+      showStatus('error', '❌ ' + (result.error || 'Authentication failed'));
+      document.getElementById('login-card').style.display = '';
+      return;
+    }
+    document.getElementById('login-card').style.display = 'none';
+    document.getElementById('editor-card').style.display = '';
+    currentSpreadsheetId = result.spreadsheetId;
+
+    const name = result.firstName || 'User';
+    document.getElementById('userBadge').innerHTML =
+      `👤 <strong>${escHtml(name)}</strong> &nbsp;|&nbsp; ` +
+      (result.isNew
+        ? `✅ 新 Spreadsheet 已创建 <a href="${escHtml(result.spreadsheetUrl)}" target="_blank">打开 →</a>`
+        : `📊 <a href="${escHtml(result.spreadsheetUrl)}" target="_blank">查看您的 Spreadsheet →</a>`
+      );
+
+    loadKeywords(result.spreadsheetId);
+  }
+
   // ─── Telegram widget callback (data-onauth mode) ──────────────────────────
   // Called directly by the Telegram widget JS — no page redirect required.
   function onTelegramAuth(user) {
     const email = (document.getElementById('emailInput')?.value || '').trim();
-    handleTelegramLogin(user, email);
+    showStatus('info', '⏳ 正在验证身份 / Verifying identity…');
+    google.script.run
+      .withSuccessHandler(handleLoginResult)
+      .withFailureHandler(function(err) { showStatus('error', '❌ Error: ' + err.message); })
+      .loginAndGetSpreadsheet(user, email);
   }
 
-  // ─── Called after Telegram auth ───────────────────────────────────────────
-  function handleTelegramLogin(authData, email) {
-    showStatus('info', '⏳ 正在验证身份 / Verifying identity…');
+  // ─── One-time token auto-login (from /login bot command) ──────────────────
+  (function checkLoginToken() {
+    const token = '<?= loginToken ?>'.trim();
+    if (!token) return;
+
+    document.getElementById('login-section').innerHTML =
+      '<div class="icon">⏳</div>' +
+      '<h2>正在验证 / Verifying…</h2>' +
+      '<p>请稍候，正在通过安全链接登录。<br>Please wait while we sign you in via secure link.</p>';
 
     google.script.run
-      .withSuccessHandler(function(result) {
-        if (!result.ok) {
-          showStatus('error', '❌ ' + (result.error || 'Authentication failed'));
-          return;
-        }
-        // Show editor
-        document.getElementById('login-card').style.display = 'none';
-        document.getElementById('editor-card').style.display = '';
-        currentSpreadsheetId = result.spreadsheetId;
-
-        const name = result.firstName || authData['username'] || 'User';
-        document.getElementById('userBadge').innerHTML =
-          `👤 <strong>${escHtml(name)}</strong> &nbsp;|&nbsp; ` +
-          (result.isNew
-            ? `✅ 新 Spreadsheet 已创建 <a href="${escHtml(result.spreadsheetUrl)}" target="_blank">打开 →</a>`
-            : `📊 <a href="${escHtml(result.spreadsheetUrl)}" target="_blank">查看您的 Spreadsheet →</a>`
-          );
-
-        loadKeywords(result.spreadsheetId);
-      })
+      .withSuccessHandler(handleLoginResult)
       .withFailureHandler(function(err) {
-        showStatus('error', '❌ Error: ' + err.message);
+        document.getElementById('login-section').innerHTML =
+          '<div class="icon">❌</div>' +
+          '<h2>登录失败 / Login Failed</h2>' +
+          '<p style="color:#b91c1c;margin-top:12px">' + err.message + '</p>' +
+          '<p style="margin-top:20px"><a href="' + window.location.pathname + '">← 返回重试 / Try again</a></p>';
       })
-      .loginAndGetSpreadsheet(authData, email);
-  }
+      .loginByToken(token);
+  })();
 
   // ─── Load keywords ─────────────────────────────────────────────────────────
   function loadKeywords(ssId) {
