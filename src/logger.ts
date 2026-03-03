@@ -31,7 +31,17 @@ const TIMEZONE = "Asia/Kuala_Lumpur"; // GMT+8
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type Direction = "IN" | "OUT";
-export type ReplyType = "预设关键词" | "AI生成" | "系统消息" | "人工回复" | "";
+export type ReplyType =
+  | "预设关键词"
+  | "预设语音"
+  | "AI生成"
+  | "AI语音理解"
+  | "AI图片分析"
+  | "AI视频分析"
+  | "文件安全提示"
+  | "系统消息"
+  | "人工回复"
+  | "";
 
 export interface LogEntry {
   direction: Direction;
@@ -46,6 +56,35 @@ export interface LogEntry {
 
 let sheetsClient: sheets_v4.Sheets | null = null;
 let logsSheetEnsured = false; // true once we've verified/created the sheet
+let disabledUntil = 0;
+let disableReason: string | null = null;
+
+const PERMISSION_BACKOFF_MS = 15 * 60 * 1000;
+const TRANSIENT_BACKOFF_MS = 60 * 1000;
+
+function extractGoogleError(err: unknown): {
+  status?: number;
+  code?: number;
+  message: string;
+} {
+  const maybe = err as {
+    status?: number;
+    code?: number;
+    message?: string;
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    cause?: { message?: string; code?: number; status?: string };
+  };
+
+  const status = maybe?.status ?? maybe?.response?.status;
+  const code = maybe?.code ?? maybe?.cause?.code;
+  const message =
+    maybe?.cause?.message ??
+    maybe?.response?.data?.error?.message ??
+    maybe?.message ??
+    "Unknown Google Sheets error";
+
+  return { status, code, message };
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,6 +184,7 @@ async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
  */
 export async function logMessage(entry: LogEntry): Promise<void> {
   if (!isGoogleConfigured()) return;
+  if (Date.now() < disabledUntil) return;
 
   const client = getClient();
   if (!client) return;
@@ -176,7 +216,26 @@ export async function logMessage(entry: LogEntry): Promise<void> {
     );
   } catch (err) {
     // Never let logging errors affect the bot
-    console.error("[logger] ⚠️ Failed to write log row:", err);
+    const details = extractGoogleError(err);
+
+    if (details.status === 403 || details.code === 403) {
+      disabledUntil = Date.now() + PERMISSION_BACKOFF_MS;
+      if (disableReason !== "permission") {
+        disableReason = "permission";
+        console.warn(
+          `[logger] ⚠️ Google Sheets permission denied (403). ` +
+          `Logging paused for ${Math.floor(PERMISSION_BACKOFF_MS / 60000)} min. ` +
+          `Share the spreadsheet with the service account as Editor.`
+        );
+      }
+      return;
+    }
+
+    disabledUntil = Date.now() + TRANSIENT_BACKOFF_MS;
+    if (disableReason !== "transient") {
+      disableReason = "transient";
+      console.warn(`[logger] ⚠️ Sheets logging temporarily unavailable: ${details.message}`);
+    }
   }
 }
 

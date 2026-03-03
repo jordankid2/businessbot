@@ -6,6 +6,8 @@ import { chat, clearHistory, directKey, businessKey } from "./ai.js";
 import { upsertConnection, canReply, getOwnerUserId } from "./connections.js";
 import { findKeywordReply, isSheetsEnabled } from "./sheets.js";
 import { logMessage, buildCustomerName } from "./logger.js";
+import { transcribeVoice, analyzePhoto, analyzeVideo, assessFileRisk } from "./media.js";
+import { detectAndLogGender } from "./gender.js";
 import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
 
@@ -28,6 +30,23 @@ try {
 }
 
 const bot = new Bot(BOT_TOKEN);
+
+// ─── Startup anti-replay guard ───────────────────────────────────────────────
+// Prevents the bot from replaying old pending updates after restart.
+const PROCESS_STARTED_AT_UNIX = Math.floor(Date.now() / 1000);
+const IGNORE_OLD_UPDATES_ON_START =
+  (process.env.IGNORE_OLD_UPDATES_ON_START ?? "true").toLowerCase() !== "false";
+const OLD_UPDATE_GRACE_SECONDS = parseInt(
+  process.env.OLD_UPDATE_GRACE_SECONDS ?? "5",
+  10
+);
+const DROP_PENDING_UPDATES =
+  (process.env.DROP_PENDING_UPDATES ?? "true").toLowerCase() !== "false";
+
+function isStaleMessageDate(messageDateUnix: number): boolean {
+  if (!IGNORE_OLD_UPDATES_ON_START) return false;
+  return messageDateUnix < PROCESS_STARTED_AT_UNIX - OLD_UPDATE_GRACE_SECONDS;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +155,15 @@ bot.on("business_connection", async (ctx) => {
  */
 bot.on("business_message", async (ctx) => {
   const msg = ctx.businessMessage;
+
+  // Ignore backlog messages sent before this process started.
+  if (isStaleMessageDate(msg.date)) {
+    console.log(
+      `[startup-guard] ⏭ Skipped stale business message  chat=${msg.chat.id}  msgDate=${msg.date}`
+    );
+    return;
+  }
+
   // business_connection_id is always present on business_message updates
   const connectionId = msg.business_connection_id!;
 
@@ -159,56 +187,177 @@ bot.on("business_message", async (ctx) => {
     );
     // Register the manual reply → activates / resets takeover TTL for this chat
     registerOwnerReply(connectionId, msg.chat.id);
-    // Log owner's manual message as an outgoing human reply
+    // Determine what the owner actually sent so the log is descriptive
+    let ownerMsgText: string;
+    if (msg.text) {
+      ownerMsgText = msg.text.trim();
+    } else if (msg.voice) {
+      ownerMsgText = `[语音消息 ${msg.voice.duration}秒]`;
+    } else if (msg.audio) {
+      ownerMsgText = `[音频: ${msg.audio.file_name ?? "audio"} ${msg.audio.duration}秒]`;
+    } else if (msg.photo) {
+      ownerMsgText = "[图片消息]";
+    } else if (msg.video) {
+      ownerMsgText = `[视频 ${msg.video.duration}秒]`;
+    } else if (msg.video_note) {
+      ownerMsgText = `[视频留言 ${msg.video_note.duration}秒]`;
+    } else if (msg.document) {
+      ownerMsgText = `[文件: ${msg.document.file_name ?? "unknown"}]`;
+    } else if (msg.sticker) {
+      ownerMsgText = `[贴纸: ${msg.sticker.emoji ?? "sticker"}]`;
+    } else {
+      ownerMsgText = "[非文字消息]";
+    }
+    // Log owner's outgoing message for CRM completeness — no auto-reply
     void logMessage({
       direction: "OUT",
       customerId: msg.chat.id,
       customerName: buildCustomerName(msg.chat),
       connectionId,
-      text: msg.text?.trim() ?? "[非文字消息 / Non-text]",
+      text: ownerMsgText,
       replyType: "人工回复",
     });
-    return; // ← do NOT auto-reply
+    return; // ← bot never auto-replies to owner's own messages
   }
 
-  const text = msg.text?.trim();
-
-  // ── Build customer display name ───────────────────────────────────────────
+  // ── Build customer display name & conversation key ─────────────────────────
   const customerName = buildCustomerName(msg.chat);
+  // key is needed by all AI-calling branches below
+  const key = businessKey(connectionId, msg.chat.id);
 
-  if (!text) {
-    // Non-text (photo, sticker, file, …) — politely ask for text
-    // Still log the incoming non-text message
+  // ── Multimodal media dispatch ─────────────────────────────────────────────
+
+  // ── Voice / Audio ──────────────────────────────────────────────────────────
+  if (msg.voice || msg.audio) {
+    const mediaFile = msg.voice ?? msg.audio!;
+    const mediaType = msg.voice ? "语音" : "音频";
+    const duration = (mediaFile as { duration?: number }).duration ?? 0;
     void logMessage({
-      direction: "IN",
-      customerId: msg.chat.id,
-      customerName,
-      connectionId,
-      text: "[非文字消息 / Non-text message]",
-      replyType: "",
+      direction: "IN", customerId: msg.chat.id, customerName, connectionId,
+      text: `[${mediaType}消息 ${duration}秒]`, replyType: "",
     });
-    const noTextReply =
-      "抱歉，我目前只支持文字消息，请用文字描述您的需求。\n" +
-      "Sorry, I only support text messages. Please describe your needs in text.";
     try {
-      await ctx.api.sendMessage(msg.chat.id, noTextReply, {
-        business_connection_id: connectionId,
-      });
-      void logMessage({
-        direction: "OUT",
-        customerId: msg.chat.id,
-        customerName,
-        connectionId,
-        text: noTextReply,
-        replyType: "系统消息",
-      });
+      await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
+      const transcription = await transcribeVoice(mediaFile.file_id, BOT_TOKEN);
+      console.log(`[media] 🎤 chat=${msg.chat.id}: "${transcription.slice(0, 80)}"`);
+      if (!transcription.trim()) {
+        const noAudio = "抱歉，无法识别语音内容，请重新发送或用文字说明。\nSorry, could not transcribe audio. Please resend or type your message.";
+        await ctx.api.sendMessage(msg.chat.id, noAudio, { business_connection_id: connectionId });
+        return;
+      }
+      const kwMatch = await findKeywordReply(transcription);
+      if (kwMatch !== null) {
+        await sleep(BOT_REPLY_DELAY_MS);
+        if (isHumanTakeover(connectionId, msg.chat.id)) return;
+        if (kwMatch.audioUrl) {
+          await ctx.api.sendVoice(msg.chat.id, kwMatch.audioUrl, { business_connection_id: connectionId });
+          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音" });
+        } else {
+          await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, { business_connection_id: connectionId });
+          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: kwMatch.reply, replyType: "预设关键词" });
+        }
+        return;
+      }
+      void detectAndLogGender(msg.chat, customerName);
+      const aiReply = await chat(key, `[语音转文字] ${transcription}`, systemPrompt);
+      await sleep(BOT_REPLY_DELAY_MS);
+      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI语音理解" });
+    } catch (err) {
+      handleBusinessApiError(err, connectionId);
+      try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 语音处理失败，请重试。\nVoice processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // ── Photo ──────────────────────────────────────────────────────────────────
+  if (msg.photo && msg.photo.length > 0) {
+    const largest = msg.photo[msg.photo.length - 1];
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" });
+    try {
+      await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
+      const visionPrompt =
+        "你是专业客服AI。客户发送了这张图片。请分析图片内容，判断它是否与商业咨询有关。" +
+        "如果有关，请给出有帮助的回应；如果看不懂客户意图，请礼貌询问客户想表达什么。" +
+        "请用中英双语回答，语言自然简洁。";
+      void detectAndLogGender(msg.chat, customerName);
+      const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
+      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, systemPrompt);
+      await sleep(BOT_REPLY_DELAY_MS);
+      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI图片分析" });
+    } catch (err) {
+      handleBusinessApiError(err, connectionId);
+      try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 图片分析失败，请重试。\nImage analysis failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // ── Video / Video Note ─────────────────────────────────────────────────────
+  if (msg.video || msg.video_note) {
+    const thumbFileId =
+      msg.video?.thumbnail?.file_id ?? msg.video_note?.thumbnail?.file_id;
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" });
+    try {
+      await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
+      const visionPrompt =
+        "你是专业客服AI。客户发送了一段视频（以下为视频缩略图）。" +
+        "请判断视频内容是否与商业咨询相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。" +
+        "请用中英双语回答。";
+      void detectAndLogGender(msg.chat, customerName);
+      const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
+      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, systemPrompt);
+      await sleep(BOT_REPLY_DELAY_MS);
+      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI视频分析" });
+    } catch (err) {
+      handleBusinessApiError(err, connectionId);
+      try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 视频处理失败，请重试。\nVideo processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // ── Document / File (metadata only — never downloaded) ────────────────────
+  if (msg.document) {
+    const doc = msg.document;
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: `[文件: ${doc.file_name ?? "unknown"}]`, replyType: "" });
+    const assessment = assessFileRisk({
+      file_name: doc.file_name,
+      mime_type: doc.mime_type,
+      file_size: doc.file_size,
+    });
+    try {
+      await sleep(BOT_REPLY_DELAY_MS);
+      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      await ctx.api.sendMessage(msg.chat.id, assessment, { business_connection_id: connectionId });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "文件安全提示" });
     } catch (err) {
       handleBusinessApiError(err, connectionId);
     }
     return;
   }
 
-  const key = businessKey(connectionId, msg.chat.id);
+  // ── Text (falls through multimodal dispatch) ───────────────────────────────
+  const text = msg.text?.trim();
+
+  if (!text) {
+    // Unsupported media type (sticker, contact, location, etc.)
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[其他类型消息]", replyType: "" });
+    const unsupportedReply =
+      "抱歉，我暂时无法处理这种类型的消息，请用文字描述您的需求。😊\n" +
+      "Sorry, I can't process this message type. Please describe your needs in text. 😊";
+    try {
+      await ctx.api.sendMessage(msg.chat.id, unsupportedReply, { business_connection_id: connectionId });
+    } catch (err) {
+      handleBusinessApiError(err, connectionId);
+    }
+    return;
+  }
+
+  // key already declared above (hoisted before multimodal dispatch)
   console.log(
     `[business] 📨  conn=${connectionId}  customer=${msg.chat.id}  "${text.slice(0, 60)}"`
   );
@@ -242,31 +391,38 @@ bot.on("business_message", async (ctx) => {
 
   try {
     // ── Step 1: Check Google Sheets for a preset keyword reply ───────────────
-    const presetReply = await findKeywordReply(text);
+    const kwMatch = await findKeywordReply(text);
 
-    if (presetReply !== null) {
+    if (kwMatch !== null) {
       // Keyword matched — apply grace-period delay then re-check takeover
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) {
         console.log(`[takeover] 🤫  Aborted keyword reply  conn=${connectionId}  chat=${msg.chat.id}`);
         return;
       }
-      // Send the preset reply directly, skip AI
-      await ctx.api.sendMessage(msg.chat.id, presetReply, {
-        business_connection_id: connectionId,
-      });
-      void logMessage({
-        direction: "OUT",
-        customerId: msg.chat.id,
-        customerName,
-        connectionId,
-        text: presetReply,
-        replyType: "预设关键词",
-      });
+      // Send the preset reply — text or pre-recorded voice
+      if (kwMatch.audioUrl) {
+        await ctx.api.sendVoice(msg.chat.id, kwMatch.audioUrl, {
+          business_connection_id: connectionId,
+        });
+        void logMessage({
+          direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
+          text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音",
+        });
+      } else {
+        await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, {
+          business_connection_id: connectionId,
+        });
+        void logMessage({
+          direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
+          text: kwMatch.reply, replyType: "预设关键词",
+        });
+      }
       return;
     }
 
     // ── Step 2: No keyword match — let AI handle the message ─────────────────
+    void detectAndLogGender(msg.chat, customerName);
     const aiReply = await chat(key, text, systemPrompt);
     // Apply grace-period delay then re-check takeover before sending
     await sleep(BOT_REPLY_DELAY_MS);
@@ -463,6 +619,13 @@ bot.command("help", async (ctx) => {
 });
 
 bot.on("message:text", async (ctx) => {
+  if (isStaleMessageDate(ctx.message.date)) {
+    console.log(
+      `[startup-guard] ⏭ Skipped stale direct message  chat=${ctx.chat.id}  msgDate=${ctx.message.date}`
+    );
+    return;
+  }
+
   const text = ctx.message.text.trim();
   if (!text) return;
 
@@ -471,9 +634,13 @@ bot.on("message:text", async (ctx) => {
 
   try {
     // ── Step 1: Check Google Sheets for a preset keyword reply ───────────────
-    const presetReply = await findKeywordReply(text);
-    if (presetReply !== null) {
-      await ctx.reply(presetReply);
+    const kwMatch = await findKeywordReply(text);
+    if (kwMatch !== null) {
+      if (kwMatch.audioUrl) {
+        await ctx.replyWithVoice(kwMatch.audioUrl);
+      } else {
+        await ctx.reply(kwMatch.reply);
+      }
       return;
     }
 
@@ -513,6 +680,7 @@ bot.catch((err) => {
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
 bot.start({
+  drop_pending_updates: DROP_PENDING_UPDATES,
   // Declare all update types the bot needs.
   // business_* types MUST be listed explicitly or Telegram will not deliver them.
   // callback_query is needed for inline button presses in business chats.
@@ -529,6 +697,10 @@ bot.start({
     console.log(`    Model  : ${process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile"}`);
     console.log(`    Sheets : ${isSheetsEnabled() ? "✅ Keyword lookup enabled" : "⚠️  Disabled (set GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SPREADSHEET_ID)"}`);
     console.log(`    Takeover TTL: ${process.env.TAKEOVER_TTL_MS ?? "600000"}ms  (active sessions: ${activeTakeoverCount()})`);
+    console.log(
+      `    Startup guard: ${IGNORE_OLD_UPDATES_ON_START ? "ON" : "OFF"} | ` +
+      `grace=${OLD_UPDATE_GRACE_SECONDS}s | drop_pending_updates=${DROP_PENDING_UPDATES}`
+    );
     console.log("    Modes  : Direct bot + Telegram Business chatbot\n");
   },
 });

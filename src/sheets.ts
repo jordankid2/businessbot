@@ -10,12 +10,15 @@
  * Row 1       : header row — skipped automatically
  * Column A    : Keywords (comma-separated; one or more triggers per row)
  * Column B    : Reply text (may be multi-line; use \n in the cell for newlines)
- * Column C    : (optional) Note/label for your reference — ignored by the bot
+ * Column C    : (optional) Audio URL — external CDN/Cloud Storage URL to a voice
+ *               file (.ogg/.mp3). When set and the keyword matches, the bot sends
+ *               this audio clip as a voice reply instead of plain text.
+ * Column D    : (optional) Note/label for your reference — ignored by the bot
  *
  * Example rows:
- *   Row 2 | 价格,报价,price,quote | 您好！报价需要了解需求，请描述您的项目。
- *   Row 3 | 联系,contact,联络    | 请通过 Telegram @zznet_support 联系我们。
- *   Row 4 | 时间,deadline,交付   | 小项目3-7天，中型2-4周，大型按里程碑排期。
+ *   Row 2 | 价格,报价,price,quote | 您好！报价需要了解需求，请描述您的项目。 | https://cdn.example.com/voice/price.ogg
+ *   Row 3 | 联系,contact,联络    | 请通过 Telegram @zznet_support 联系我们。 |
+ *   Row 4 | 时间,deadline,交付   | 小项目3-7天，中型2-4周，大型按里程碑排期。 |
  *
  * ─── Matching logic ───────────────────────────────────────────────────────────
  * - Case-insensitive
@@ -45,6 +48,15 @@ interface KeywordRow {
   keywords: string[];
   /** The reply to send when any keyword matches */
   reply: string;
+  /** Optional external audio URL — send as voice instead of text when set */
+  audioUrl?: string;
+}
+
+/** Return type of findKeywordReply */
+export interface KeywordMatch {
+  reply: string;
+  /** External audio URL to send as voice, if configured */
+  audioUrl?: string;
 }
 
 // ─── Configuration from env ───────────────────────────────────────────────────
@@ -62,6 +74,35 @@ let sheetsClient: sheets_v4.Sheets | null = null;
 let cache: KeywordRow[] | null = null;
 let cacheExpiresAt = 0;
 let configWarned = false;
+let fetchDisabledUntil = 0;
+let fetchDisabledReason: "permission" | "transient" | null = null;
+
+const PERMISSION_BACKOFF_MS = 15 * 60 * 1000;
+const TRANSIENT_BACKOFF_MS = 60 * 1000;
+
+function extractGoogleError(err: unknown): {
+  status?: number;
+  code?: number;
+  message: string;
+} {
+  const maybe = err as {
+    status?: number;
+    code?: number;
+    message?: string;
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    cause?: { message?: string; code?: number; status?: string };
+  };
+
+  const status = maybe?.status ?? maybe?.response?.status;
+  const code = maybe?.code ?? maybe?.cause?.code;
+  const message =
+    maybe?.cause?.message ??
+    maybe?.response?.data?.error?.message ??
+    maybe?.message ??
+    "Unknown Google Sheets error";
+
+  return { status, code, message };
+}
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
@@ -93,8 +134,8 @@ async function fetchRows(): Promise<KeywordRow[]> {
   const client = getSheetsClient();
   if (!client) return [];
 
-  // range = SheetName!A2:B  (skip header row 1, read all rows with data)
-  const range = `${SHEET_NAME}!A2:B`;
+  // range = SheetName!A2:C  (skip header row 1; A=keywords, B=reply, C=audio URL)
+  const range = `${SHEET_NAME}!A2:C`;
 
   const response = await client.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -108,6 +149,7 @@ async function fetchRows(): Promise<KeywordRow[]> {
   for (const row of rows) {
     const keywordCell = (row[0] as string | undefined)?.trim() ?? "";
     const replyCell = (row[1] as string | undefined)?.trim() ?? "";
+    const audioUrlCell = (row[2] as string | undefined)?.trim() ?? "";
 
     if (!keywordCell || !replyCell) continue; // skip empty rows
 
@@ -118,7 +160,11 @@ async function fetchRows(): Promise<KeywordRow[]> {
 
     if (keywords.length === 0) continue;
 
-    parsed.push({ keywords, reply: replyCell });
+    parsed.push({
+      keywords,
+      reply: replyCell,
+      ...(audioUrlCell ? { audioUrl: audioUrlCell } : {}),
+    });
   }
 
   console.log(`[sheets] 🔄 Loaded ${parsed.length} keyword row(s) from "${SHEET_NAME}"`);
@@ -128,6 +174,10 @@ async function fetchRows(): Promise<KeywordRow[]> {
 // ─── Cache management ─────────────────────────────────────────────────────────
 
 async function getRows(): Promise<KeywordRow[]> {
+  if (Date.now() < fetchDisabledUntil) {
+    return cache ?? [];
+  }
+
   if (cache !== null && Date.now() < cacheExpiresAt) {
     return cache;
   }
@@ -136,7 +186,26 @@ async function getRows(): Promise<KeywordRow[]> {
     cache = await fetchRows();
     cacheExpiresAt = Date.now() + CACHE_TTL_MS;
   } catch (err) {
-    console.error("[sheets] ❌ Failed to fetch keyword rows:", err);
+    const details = extractGoogleError(err);
+
+    if (details.status === 403 || details.code === 403) {
+      fetchDisabledUntil = Date.now() + PERMISSION_BACKOFF_MS;
+      if (fetchDisabledReason !== "permission") {
+        fetchDisabledReason = "permission";
+        console.warn(
+          `[sheets] ⚠️ Permission denied (403). ` +
+          `Keyword lookup paused for ${Math.floor(PERMISSION_BACKOFF_MS / 60000)} min. ` +
+          `Share sheet with service account as Viewer or Editor.`
+        );
+      }
+    } else {
+      fetchDisabledUntil = Date.now() + TRANSIENT_BACKOFF_MS;
+      if (fetchDisabledReason !== "transient") {
+        fetchDisabledReason = "transient";
+        console.warn(`[sheets] ⚠️ Keyword lookup temporarily unavailable: ${details.message}`);
+      }
+    }
+
     // Return stale cache if available, empty array otherwise
     cache = cache ?? [];
   }
@@ -155,10 +224,12 @@ export function invalidateCache(): void {
 /**
  * Check whether `userMessage` contains any preset keyword.
  *
- * @returns The preset reply string if a keyword matched, or `null` if none matched
- *          (meaning the AI should handle the message).
+ * @returns A KeywordMatch object if a keyword matched (includes optional audioUrl),
+ *          or `null` if none matched (meaning the AI should handle the message).
  */
-export async function findKeywordReply(userMessage: string): Promise<string | null> {
+export async function findKeywordReply(
+  userMessage: string
+): Promise<KeywordMatch | null> {
   const rows = await getRows();
   if (rows.length === 0) return null;
 
@@ -167,8 +238,11 @@ export async function findKeywordReply(userMessage: string): Promise<string | nu
   for (const row of rows) {
     for (const kw of row.keywords) {
       if (lowerMsg.includes(kw)) {
-        console.log(`[sheets] ✅ Keyword match: "${kw}" → preset reply`);
-        return row.reply;
+        console.log(
+          `[sheets] ✅ Keyword match: "${kw}" → preset reply${row.audioUrl ? " + audio" : ""
+          }`
+        );
+        return { reply: row.reply, audioUrl: row.audioUrl };
       }
     }
   }
