@@ -4,6 +4,21 @@ A production-ready Telegram customer support bot powered by **Grammy** (Node.js)
 
 ---
 
+## Deploy on Railway
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/<YOUR_TEMPLATE_CODE>?utm_medium=integration&utm_source=button&utm_campaign=openclaw)
+
+OpenClaw Railway template authoring assets are in `templates/openclaw/`:
+
+- `templates/openclaw/overview.md`
+- `templates/openclaw/variables.md`
+- `templates/openclaw/publish-checklist.md`
+- `templates/openclaw/README.md`
+
+Replace `<YOUR_TEMPLATE_CODE>` after publishing your template in Railway.
+
+---
+
 ## Quick Start
 
 ### 1. Install dependencies
@@ -105,5 +120,4 @@ pm2 start dist/bot.js --name businessbot
 pm2 save
 pm2 startup
 ```
-# businessbot
 # businessbot
