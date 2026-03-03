@@ -35,11 +35,6 @@
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-/** How long after the owner's last manual reply before the bot resumes. */
-export const TAKEOVER_TTL_MS = parseInt(
-  process.env.TAKEOVER_TTL_MS ?? String(10 * 60 * 1000),
-  10
-);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -68,7 +63,8 @@ function makeKey(connectionId: string, chatId: number): string {
 /**
  * Register a manual owner reply (AUTO mode).
  * Call this whenever a business_message arrives from the owner.
- * Resets the TTL timer. Preserves locked state if already locked.
+ * Sets the per-message takeover flag. Cleared by clearAutoTakeover() after
+ * the bot skips one reply. Preserves locked state if already locked.
  */
 export function registerOwnerReply(connectionId: string, chatId: number): void {
   const key = makeKey(connectionId, chatId);
@@ -77,10 +73,9 @@ export function registerOwnerReply(connectionId: string, chatId: number): void {
     lastOwnerReplyAt: Date.now(),
     locked: existing?.locked ?? false,   // preserve explicit lock
   });
-  const mode = existing?.locked ? "LOCKED" : "AUTO TTL";
+  const mode = existing?.locked ? "LOCKED" : "AUTO (per-message)";
   console.log(
-    `[takeover] 🙋 Human takeover active [${mode}]  conn=${connectionId}  chat=${chatId}  ` +
-    `(TTL resets to ${TAKEOVER_TTL_MS / 60000} min)`
+    `[takeover] 🙋 Human takeover active [${mode}]  conn=${connectionId}  chat=${chatId}`
   );
 }
 
@@ -104,31 +99,39 @@ export function lockTakeover(connectionId: string, chatId: number): void {
  * Returns true if the bot should defer to the human for this chat.
  *
  * A chat is in takeover when:
- *   - LOCKED mode: locked=true (indefinite, ignores TTL)
- *   - AUTO mode: owner replied within TAKEOVER_TTL_MS
+ *   - LOCKED mode: locked=true (indefinite, ignores any timer)
+ *   - AUTO mode:   owner replied since the last customer message
+ *                  (flag is cleared by clearAutoTakeover() after one skip)
  */
 export function isHumanTakeover(connectionId: string, chatId: number): boolean {
-  // Global pause always wins (no TTL)
+  // Global pause always wins
   if (pausedChats.has(chatId)) return true;
 
   const key = makeKey(connectionId, chatId);
   const entry = takeoverMap.get(key);
   if (!entry) return false;
 
-  // LOCKED mode — never expires automatically
+  // LOCKED mode — never clears automatically
   if (entry.locked) return true;
 
-  // AUTO mode — check TTL
-  const elapsed = Date.now() - entry.lastOwnerReplyAt;
-  if (elapsed > TAKEOVER_TTL_MS) {
+  // AUTO mode — flag is set; caller should clear with clearAutoTakeover()
+  return true;
+}
+
+/**
+ * Clear the AUTO takeover flag for a chat after the bot has skipped one reply.
+ * Does NOT affect LOCKED mode (set via /pause).
+ * Call this immediately after isHumanTakeover() returns true in a post-grace check.
+ */
+export function clearAutoTakeover(connectionId: string, chatId: number): void {
+  const key = makeKey(connectionId, chatId);
+  const entry = takeoverMap.get(key);
+  if (entry && !entry.locked) {
     takeoverMap.delete(key);
     console.log(
-      `[takeover] ⏱  Auto-TTL expired  conn=${connectionId}  chat=${chatId}  → bot resumes`
+      `[takeover] ♻️  AUTO takeover cleared  conn=${connectionId}  chat=${chatId}  → bot resumes next message`
     );
-    return false;
   }
-
-  return true;
 }
 
 /**
@@ -150,26 +153,18 @@ export function listActiveTakeovers(): Array<{
   chatId: number;
   locked: boolean;
   lastOwnerReplyAt: number;
-  expiresInMs: number | null;   // null = locked (no expiry)
+  expiresInMs: null;   // always null — AUTO cleared per-message, LOCKED never expires
 }> {
-  const now = Date.now();
   const result = [];
   for (const [key, entry] of takeoverMap) {
     const [connectionId, chatIdStr] = key.split(":");
     const chatId = parseInt(chatIdStr, 10);
-    // Purge expired AUTO entries on the fly
-    if (!entry.locked && now - entry.lastOwnerReplyAt > TAKEOVER_TTL_MS) {
-      takeoverMap.delete(key);
-      continue;
-    }
     result.push({
       connectionId,
       chatId,
       locked: entry.locked,
       lastOwnerReplyAt: entry.lastOwnerReplyAt,
-      expiresInMs: entry.locked
-        ? null
-        : TAKEOVER_TTL_MS - (now - entry.lastOwnerReplyAt),
+      expiresInMs: null as null,
     });
   }
   return result;

@@ -6,7 +6,8 @@ import { findKeywordReply, isSheetsEnabled } from "./sheets.js";
 import { logMessage, buildCustomerName } from "./logger.js";
 import { transcribeVoice, analyzePhoto, analyzeVideo, assessFileRisk } from "./media.js";
 import { detectGender } from "./gender.js";
-import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
+import { registerOwnerReply, isHumanTakeover, clearAutoTakeover, isChatPaused,
+         activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
 import { generateLoginToken } from "./tokens.js";
 import { getOrProvisionUserSheet, isAdmin } from "./registry.js";
@@ -298,7 +299,7 @@ bot.on("business_message", async (ctx) => {
       const kwMatch = await findKeywordReply(transcription, ownerSsId);
       if (kwMatch !== null) {
         await sleep(BOT_REPLY_DELAY_MS);
-        if (isHumanTakeover(connectionId, msg.chat.id)) return;
+        if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
         if (kwMatch.audioUrl) {
           await ctx.api.sendVoice(msg.chat.id, kwMatch.audioUrl, { business_connection_id: connectionId });
           void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音" }, ownerSsId);
@@ -311,7 +312,7 @@ bot.on("business_message", async (ctx) => {
       const gender = await detectGender(msg.chat);
       const aiReply = await chat(key, `[语音转文字] ${transcription}`, withGenderCtx(adminSystemPrompt, gender));
       await sleep(BOT_REPLY_DELAY_MS);
-      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
       void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI语音理解" }, ownerSsId);
     } catch (err) {
@@ -334,7 +335,7 @@ bot.on("business_message", async (ctx) => {
       const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
-      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
       void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI图片分析" }, ownerSsId);
     } catch (err) {
@@ -358,7 +359,7 @@ bot.on("business_message", async (ctx) => {
       const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
-      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
       void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI视频分析" }, ownerSsId);
     } catch (err) {
@@ -379,7 +380,7 @@ bot.on("business_message", async (ctx) => {
     });
     try {
       await sleep(BOT_REPLY_DELAY_MS);
-      if (isHumanTakeover(connectionId, msg.chat.id)) return;
+      if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, assessment, { business_connection_id: connectionId });
       void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "文件安全提示" }, ownerSsId);
     } catch (err) {
@@ -420,12 +421,12 @@ bot.on("business_message", async (ctx) => {
     replyType: "",
   }, ownerSsId);
 
-  // ── Human takeover check ─────────────────────────────────────────────────
-  // If the owner has recently sent a manual reply in this chat, we yield to
-  // them and skip the auto-reply to prevent the customer seeing two replies.
-  if (isHumanTakeover(connectionId, msg.chat.id)) {
+  // ── Human takeover check (explicit /pause lock only) ────────────────────────
+  // AUTO takeover is checked AFTER the grace period below.
+  // This early check only blocks chats explicitly locked via /pause.
+  if (isChatPaused(msg.chat.id)) {
     console.log(
-      `[takeover] 🤫  Skipping auto-reply  conn=${connectionId}  chat=${msg.chat.id} — human is handling`
+      `[takeover] 🔒  Chat locked (/pause)  conn=${connectionId}  chat=${msg.chat.id} — skipping auto-reply`
     );
     return;
   }
@@ -446,6 +447,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) {
         console.log(`[takeover] 🤫  Aborted keyword reply  conn=${connectionId}  chat=${msg.chat.id}`);
+        clearAutoTakeover(connectionId, msg.chat.id);
         return;
       }
       // Send the preset reply — text or pre-recorded voice
@@ -475,8 +477,7 @@ bot.on("business_message", async (ctx) => {
     // Apply grace-period delay then re-check takeover before sending
     await sleep(BOT_REPLY_DELAY_MS);
     if (isHumanTakeover(connectionId, msg.chat.id)) {
-      console.log(`[takeover] \ud83e\udd2b  Aborted AI reply  conn=${connectionId}  chat=${msg.chat.id}`);
-      return;
+      console.log(`[takeover] \ud83e\udd2b  Aborted AI reply  conn=${connectionId}  chat=${msg.chat.id}`);      clearAutoTakeover(connectionId, msg.chat.id);      return;
     }
     await ctx.api.sendMessage(msg.chat.id, aiReply, {
       business_connection_id: connectionId,
@@ -628,12 +629,12 @@ bot.command("resume", async (ctx) => {
  */
 bot.command("status", async (ctx) => {
   if (!(await requireAdmin(ctx))) return;
-  const paused = listPausedChats();
-  const ttlActive = listActiveTakeovers().filter((t) => !t.locked);
+  const paused    = listPausedChats();
+  const autoActive = listActiveTakeovers().filter((t) => !t.locked);
 
   const lines: string[] = ["*🤖 Bot Takeover Status*\n"];
 
-  if (paused.length === 0 && ttlActive.length === 0) {
+  if (paused.length === 0 && autoActive.length === 0) {
     lines.push("✅ 所有对话均处于自动回复模式（无接管）");
   } else {
     if (paused.length > 0) {
@@ -642,18 +643,15 @@ bot.command("status", async (ctx) => {
         lines.push(`  • chatId \`${id}\` — /resume ${id}`);
       }
     }
-    if (ttlActive.length > 0) {
-      lines.push(`\n⏳ *TTL 接管中* (${ttlActive.length})`);
-      for (const t of ttlActive) {
-        const minsLeft = t.expiresInMs !== null
-          ? Math.ceil(t.expiresInMs / 60000)
-          : '∞';
-        lines.push(`  • chatId \`${t.chatId}\` conn \`${t.connectionId.slice(0, 8)}\` — ${minsLeft} 分钟后恢复`);
+    if (autoActive.length > 0) {
+      lines.push(`\n🙋 *临时接管中* (下一条消息自动恢复) (${autoActive.length})`);
+      for (const t of autoActive) {
+        lines.push(`  • chatId \`${t.chatId}\` conn \`${t.connectionId.slice(0, 8)}\``);
       }
     }
   }
 
-  lines.push(`\n⏱ 回复延迟: ${BOT_REPLY_DELAY_MS / 1000}s | TTL: ${parseInt(process.env.TAKEOVER_TTL_MS ?? "600000", 10) / 60000}min`);
+  lines.push(`\n⏱ 回复延迟: ${BOT_REPLY_DELAY_MS / 1000}s | 接管模式: 每条消息独立`);
   await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
 });
 
@@ -813,7 +811,7 @@ async function startWithRetry(
           console.log(`\n🚀  Bot @${info.username} is live!`);
           console.log(`    Model  : ${process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile"}`);
           console.log(`    Sheets : ${isSheetsEnabled() ? "✅ Keyword lookup enabled" : "⚠️  Disabled (set GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SPREADSHEET_ID)"}`);
-          console.log(`    Takeover TTL: ${process.env.TAKEOVER_TTL_MS ?? "600000"}ms  (active sessions: ${activeTakeoverCount()})`);
+          console.log(`    Takeover: per-message (active paused sessions: ${activeTakeoverCount()})`);
           console.log(
             `    Startup guard: ${IGNORE_OLD_UPDATES_ON_START ? "ON" : "OFF"} | ` +
             `grace=${OLD_UPDATE_GRACE_SECONDS}s | drop_pending_updates=${DROP_PENDING_UPDATES}`
