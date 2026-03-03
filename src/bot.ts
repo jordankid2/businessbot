@@ -7,11 +7,11 @@ import { upsertConnection, canReply, getOwnerUserId } from "./connections.js";
 import { findKeywordReply, isSheetsEnabled } from "./sheets.js";
 import { logMessage, buildCustomerName } from "./logger.js";
 import { transcribeVoice, analyzePhoto, analyzeVideo, assessFileRisk } from "./media.js";
-import { detectAndLogGender } from "./gender.js";
+import { detectGender } from "./gender.js";
 import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
 import { generateLoginToken } from "./tokens.js";
-import { getOrProvisionUserSheet } from "./registry.js";
+import { getOrProvisionUserSheet, isAdmin } from "./registry.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -65,6 +65,34 @@ const BOT_REPLY_DELAY_MS = parseInt(
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Build a gender-aware system prompt addition for AI calls.
+ * If gender is unknown we send the base prompt unchanged.
+ */
+function withGenderCtx(basePrompt: string, gender: string): string {
+  return gender === "未知"
+    ? basePrompt
+    : `${basePrompt}\n\n[当前对话对象性别: ${gender}，请据此调整称谓与语气]`;
+}
+
+/**
+ * Check that the sender is a registered platform admin.
+ * Replies with an error and returns false if not.
+ */
+async function requireAdmin(ctx: { from?: { id: number }; reply: (text: string) => Promise<unknown> }): Promise<boolean> {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.reply("⛔ 无法识别用户身份。");
+    return false;
+  }
+  const allowed = await isAdmin(userId);
+  if (!allowed) {
+    await ctx.reply("⛔ 此功能仅限平台管理员使用。\nThis command is for administrators only.");
+    return false;
+  }
+  return true;
+}
 
 // ─── Business API error helper ────────────────────────────────────────────────
 /**
@@ -134,15 +162,23 @@ bot.on("business_connection", async (ctx) => {
   upsertConnection(conn);
 
   if (conn.is_enabled) {
-    console.log(`[business] \u2705  Connection enabled  id=${conn.id}  owner=${conn.user.id}`);
-    // Pre-provision user spreadsheet so first message is faster
+    // ── Admin whitelist check ──────────────────────────────────────────────────────────
+    const adminAllowed = await isAdmin(conn.user.id);
+    if (!adminAllowed) {
+      console.warn(
+        `[business] ⛔  userId=${conn.user.id} connected but is NOT in Admins whitelist — ignoring.`
+      );
+      return;
+    }
+    console.log(`[business] ✅  Admin connected  id=${conn.id}  userId=${conn.user.id}`);
+    // Pre-provision admin spreadsheet so first message is faster
     void getOrProvisionUserSheet(
       conn.user.id,
       conn.user.username ?? "",
       conn.user.first_name ?? ""
     );
   } else {
-    console.log(`[business] \u26a0\ufe0f  Connection disabled  id=${conn.id}  owner=${conn.user.id}`);
+    console.log(`[business] ⚠️  Connection disabled  id=${conn.id}  userId=${conn.user.id}`);
   }
 });
 
@@ -268,8 +304,8 @@ bot.on("business_message", async (ctx) => {
         }
         return;
       }
-      void detectAndLogGender(msg.chat, customerName, ownerSsId);
-      const aiReply = await chat(key, `[语音转文字] ${transcription}`, systemPrompt);
+      const gender = await detectGender(msg.chat);
+      const aiReply = await chat(key, `[语音转文字] ${transcription}`, withGenderCtx(systemPrompt, gender));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -291,9 +327,8 @@ bot.on("business_message", async (ctx) => {
         "你是专业客服AI。客户发送了这张图片。请分析图片内容，判断它是否与商业咨询有关。" +
         "如果有关，请给出有帮助的回应；如果看不懂客户意图，请礼貌询问客户想表达什么。" +
         "请用中英双语回答，语言自然简洁。";
-      void detectAndLogGender(msg.chat, customerName, ownerSsId);
       const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, systemPrompt);
+      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(systemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -316,9 +351,8 @@ bot.on("business_message", async (ctx) => {
         "你是专业客服AI。客户发送了一段视频（以下为视频缩略图）。" +
         "请判断视频内容是否与商业咨询相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。" +
         "请用中英双语回答。";
-      void detectAndLogGender(msg.chat, customerName, ownerSsId);
       const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, systemPrompt);
+      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(systemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -432,8 +466,8 @@ bot.on("business_message", async (ctx) => {
     }
 
     // ── Step 2: No keyword match — let AI handle the message ─────────────────
-    void detectAndLogGender(msg.chat, customerName, ownerSsId);
-    const aiReply = await chat(key, text, systemPrompt);
+    const gender = await detectGender(msg.chat);
+    const aiReply = await chat(key, text, withGenderCtx(systemPrompt, gender));
     // Apply grace-period delay then re-check takeover before sending
     await sleep(BOT_REPLY_DELAY_MS);
     if (isHumanTakeover(connectionId, msg.chat.id)) {
@@ -529,6 +563,7 @@ bot.command("start", async (ctx) => {
 });
 
 bot.command("reset", async (ctx) => {
+  if (!(await requireAdmin(ctx))) return;
   clearHistory(directKey(ctx.chat.id));
   await ctx.reply(
     "✅ 对话记录已清除，我们重新开始吧！\n" +
@@ -547,6 +582,7 @@ bot.command("reset", async (ctx) => {
  * Example: /pause 123456789
  */
 bot.command("pause", async (ctx) => {
+  if (!(await requireAdmin(ctx))) return;
   const arg = ctx.match?.trim();
   const chatId = arg ? parseInt(arg, 10) : NaN;
   if (isNaN(chatId)) {
@@ -568,6 +604,7 @@ bot.command("pause", async (ctx) => {
  * Example: /resume 123456789
  */
 bot.command("resume", async (ctx) => {
+  if (!(await requireAdmin(ctx))) return;
   const arg = ctx.match?.trim();
   const chatId = arg ? parseInt(arg, 10) : NaN;
   if (isNaN(chatId)) {
@@ -586,6 +623,7 @@ bot.command("resume", async (ctx) => {
  * Show all chats currently under human takeover (paused or TTL-active).
  */
 bot.command("status", async (ctx) => {
+  if (!(await requireAdmin(ctx))) return;
   const paused = listPausedChats();
   const ttlActive = listActiveTakeovers().filter((t) => !t.locked);
 
@@ -630,6 +668,7 @@ bot.command("help", async (ctx) => {
 });
 
 bot.command("login", async (ctx) => {
+  if (!(await requireAdmin(ctx))) return;
   const gasUrl = process.env.GAS_WEB_APP_URL?.trim();
   if (!gasUrl) {
     await ctx.reply(
