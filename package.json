@@ -1,5 +1,5 @@
 {
-  "name": "businessbot",
+  "name": "business",
   "version": "1.0.0",
   "description": "Telegram Business Customer Support AI Bot powered by Grammy + Groq",
   "main": "dist/bot.js",
