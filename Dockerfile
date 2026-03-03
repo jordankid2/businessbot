@@ -24,6 +24,9 @@ RUN npm ci --omit=dev
 # Copy compiled output from builder
 COPY --from=builder /app/dist ./dist
 
+# Copy config markdown files (persona, services, pricing, faq, business)
+COPY config ./config
+
 # Railway injects env vars at runtime — no .env file needed
 ENV NODE_ENV=production
 

@@ -2,6 +2,9 @@
 builder = "dockerfile"
 
 [deploy]
-# Railway will restart the process automatically on crash
+# Only one replica — Telegram long-polling must have a single consumer.
+numReplicas = 1
+# Restart automatically on non-zero exit (e.g. network loss).
+# Exit code 0 (graceful 409 handling) will NOT trigger a restart.
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10

@@ -679,28 +679,60 @@ bot.catch((err) => {
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
-bot.start({
-  drop_pending_updates: DROP_PENDING_UPDATES,
-  // Declare all update types the bot needs.
-  // business_* types MUST be listed explicitly or Telegram will not deliver them.
-  // callback_query is needed for inline button presses in business chats.
-  allowed_updates: [
-    "message",
-    "callback_query",
-    "business_connection",
-    "business_message",
-    "edited_business_message",
-    "deleted_business_messages",
-  ],
-  onStart: (info) => {
-    console.log(`\n🚀  Bot @${info.username} is live!`);
-    console.log(`    Model  : ${process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile"}`);
-    console.log(`    Sheets : ${isSheetsEnabled() ? "✅ Keyword lookup enabled" : "⚠️  Disabled (set GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SPREADSHEET_ID)"}`);
-    console.log(`    Takeover TTL: ${process.env.TAKEOVER_TTL_MS ?? "600000"}ms  (active sessions: ${activeTakeoverCount()})`);
-    console.log(
-      `    Startup guard: ${IGNORE_OLD_UPDATES_ON_START ? "ON" : "OFF"} | ` +
-      `grace=${OLD_UPDATE_GRACE_SECONDS}s | drop_pending_updates=${DROP_PENDING_UPDATES}`
-    );
-    console.log("    Modes  : Direct bot + Telegram Business chatbot\n");
-  },
-});
+/**
+ * Railway rolling deployments briefly run two containers simultaneously.
+ * The new container gets a 409 from Telegram (old one still polling).
+ * We retry with backoff until the old instance is killed (~30 s max wait).
+ */
+async function startWithRetry(
+  maxAttempts = 8,
+  backoffMs = 5000
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await bot.start({
+        drop_pending_updates: DROP_PENDING_UPDATES,
+        allowed_updates: [
+          "message",
+          "callback_query",
+          "business_connection",
+          "business_message",
+          "edited_business_message",
+          "deleted_business_messages",
+        ],
+        onStart: (info) => {
+          console.log(`\n🚀  Bot @${info.username} is live!`);
+          console.log(`    Model  : ${process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile"}`);
+          console.log(`    Sheets : ${isSheetsEnabled() ? "✅ Keyword lookup enabled" : "⚠️  Disabled (set GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SPREADSHEET_ID)"}`);
+          console.log(`    Takeover TTL: ${process.env.TAKEOVER_TTL_MS ?? "600000"}ms  (active sessions: ${activeTakeoverCount()})`);
+          console.log(
+            `    Startup guard: ${IGNORE_OLD_UPDATES_ON_START ? "ON" : "OFF"} | ` +
+            `grace=${OLD_UPDATE_GRACE_SECONDS}s | drop_pending_updates=${DROP_PENDING_UPDATES}`
+          );
+          console.log("    Modes  : Direct bot + Telegram Business chatbot\n");
+        },
+      });
+      return; // clean exit after bot.stop() is called
+    } catch (err) {
+      const is409 =
+        err instanceof GrammyError && err.error_code === 409;
+      if (is409 && attempt < maxAttempts) {
+        console.warn(
+          `[bot] ⚠️  409 Conflict — another instance is still running. ` +
+          `Retrying in ${backoffMs / 1000}s… (attempt ${attempt}/${maxAttempts})`
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+        // Increase backoff slightly on each retry
+        backoffMs = Math.min(backoffMs * 1.5, 30_000);
+      } else {
+        // Not a 409, or we've exhausted retries — crash loudly so Railway restarts us
+        console.error("[bot] ❌  Fatal error during bot.start():", err);
+        process.exit(1);
+      }
+    }
+  }
+  console.error("[bot] ❌  Could not connect after max retries — exiting.");
+  process.exit(1);
+}
+
+void startWithRetry();
