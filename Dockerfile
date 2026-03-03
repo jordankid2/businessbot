@@ -27,6 +27,9 @@ COPY --from=builder /app/dist ./dist
 # Copy config markdown files (persona, services, pricing, faq, business)
 COPY config ./config
 
+# Copy Mini App static files served by Express
+COPY public ./public
+
 # Railway injects env vars at runtime — no .env file needed
 ENV NODE_ENV=production
 

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>关键词管理 · zznet Bot</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg:          var(--tg-theme-bg-color,          #fff);
+      --text:        var(--tg-theme-text-color,         #222);
+      --hint:        var(--tg-theme-hint-color,         #888);
+      --link:        var(--tg-theme-link-color,         #007bff);
+      --button-bg:   var(--tg-theme-button-color,       #007bff);
+      --button-text: var(--tg-theme-button-text-color,  #fff);
+      --section-bg:  var(--tg-theme-section-bg-color,   #f5f5f5);
+      --border:      var(--tg-theme-secondary-bg-color, #e0e0e0);
+      --accent:      var(--tg-theme-accent-text-color,  #007aff);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      min-height: 100vh;
+      padding-bottom: 80px;
+    }
+
+    /* ── Loading / Error screens ─────────────────────────────────────────── */
+    #loading, #error-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 60vh;
+      gap: 12px;
+      padding: 24px;
+      text-align: center;
+    }
+    #loading .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--button-bg);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #error-screen { color: #e53e3e; }
+    #error-msg { font-size: 13px; color: var(--hint); max-width: 280px; }
+
+    /* ── Main layout ─────────────────────────────────────────────────────── */
+    #app { display: none; }
+
+    .header {
+      background: var(--section-bg);
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0; z-index: 10;
+    }
+    .header h1 {
+      font-size: 17px; font-weight: 600; letter-spacing: -0.3px;
+    }
+    .header-sub {
+      font-size: 12px; color: var(--hint); margin-top: 2px;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }
+    .header-sub a { color: var(--link); text-decoration: none; }
+
+    /* ── Toolbar ─────────────────────────────────────────────────────────── */
+    .toolbar {
+      display: flex; gap: 8px; padding: 10px 16px 6px;
+      align-items: center;
+    }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: 5px; padding: 8px 16px; border-radius: 10px; border: none;
+      font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s;
+    }
+    .btn:active { opacity: .7; }
+    .btn-primary { background: var(--button-bg); color: var(--button-text); }
+    .btn-outline  {
+      background: transparent;
+      border: 1.5px solid var(--button-bg);
+      color: var(--button-bg);
+    }
+    .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+    .spacer { flex: 1; }
+
+    /* ── Status bar ──────────────────────────────────────────────────────── */
+    #status-bar {
+      font-size: 12px; padding: 4px 16px;
+      color: var(--hint); min-height: 22px;
+      transition: color .3s;
+    }
+    #status-bar.ok    { color: #22a06b; }
+    #status-bar.error { color: #e53e3e; }
+
+    /* ── Keyword table ───────────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; padding: 0 0 16px; }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 13px;
+    }
+
+    thead tr th {
+      background: var(--section-bg);
+      padding: 9px 10px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--hint);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      position: sticky; top: 0;
+    }
+
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+
+    tbody td {
+      padding: 6px 8px;
+      vertical-align: top;
+    }
+
+    tbody td input, tbody td textarea {
+      width: 100%;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 5px 6px;
+      font-size: 13px;
+      color: var(--text);
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      transition: border-color .15s;
+      min-width: 70px;
+    }
+    tbody td input:focus, tbody td textarea:focus {
+      border-color: var(--accent);
+      background: var(--section-bg);
+    }
+
+    .col-kw     { min-width: 100px; max-width: 140px; }
+    .col-reply  { min-width: 140px; }
+    .col-audio  { min-width: 100px; max-width: 180px; }
+    .col-notes  { min-width: 90px;  max-width: 130px; }
+    .col-del    { width: 36px; text-align: center; }
+
+    .btn-del {
+      background: none; border: none; cursor: pointer;
+      color: #e53e3e; font-size: 16px; padding: 4px 6px;
+      border-radius: 6px; line-height: 1;
+    }
+    .btn-del:active { background: #fee2e2; }
+
+    /* ── Empty state ─────────────────────────────────────────────────────── */
+    #empty-row td {
+      text-align: center; color: var(--hint);
+      padding: 28px 16px; font-size: 13px;
+    }
+
+    /* ── Fixed bottom save bar ───────────────────────────────────────────── */
+    .bottom-bar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      padding: 10px 16px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      display: flex; gap: 8px;
+    }
+    .bottom-bar .btn { flex: 1; }
+
+    /* ── Spreadsheet link chip ───────────────────────────────────────────── */
+    .ss-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: var(--section-bg); border-radius: 6px;
+      padding: 2px 8px; font-size: 11px; color: var(--link);
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading screen -->
+<div id="loading">
+  <div class="spinner"></div>
+  <div style="color:var(--hint);font-size:13px">正在验证身份…</div>
+</div>
+
+<!-- Error screen -->
+<div id="error-screen" style="display:none">
+  <div style="font-size:32px">⚠️</div>
+  <div style="font-weight:600">无法加载</div>
+  <div id="error-msg"></div>
+</div>
+
+<!-- Main app -->
+<div id="app">
+  <div class="header">
+    <h1>关键词管理</h1>
+    <div class="header-sub">
+      <span id="user-label"></span>
+      <a id="ss-link" class="ss-chip" href="#" target="_blank" style="display:none">
+        📊 打开电子表格
+      </a>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn btn-outline btn-sm" onclick="addRow()">＋ 添加关键词</button>
+    <div class="spacer"></div>
+    <button class="btn btn-outline btn-sm" onclick="loadKeywords()">↺ 刷新</button>
+  </div>
+
+  <div id="status-bar"></div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="col-kw">关键词</th>
+          <th class="col-reply">自动回复内容</th>
+          <th class="col-audio">语音URL（可选）</th>
+          <th class="col-notes">备注</th>
+          <th class="col-del"></th>
+        </tr>
+      </thead>
+      <tbody id="kw-body">
+        <tr id="empty-row"><td colspan="5">暂无关键词，点击「添加」开始设置</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="bottom-bar">
+    <button class="btn btn-primary" onclick="saveKeywords()">💾 保存更改</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const tg = window.Telegram?.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+  }
+
+  let _ssId   = "";
+  let _saving = false;
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function show(id)   { document.getElementById(id).style.display = ""; }
+  function hide(id)   { document.getElementById(id).style.display = "none"; }
+  function block(id)  { document.getElementById(id).style.display = "flex"; }
+
+  function setStatus(msg, type) {
+    const bar = document.getElementById("status-bar");
+    bar.textContent = msg;
+    bar.className   = type ?? "";
+  }
+
+  function showError(msg) {
+    hide("loading");
+    hide("app");
+    block("error-screen");
+    document.getElementById("error-msg").textContent = msg;
+  }
+
+  // ── Auth ───────────────────────────────────────────────────────────────────
+
+  async function authenticate() {
+    const initData = tg?.initData;
+    if (!initData) {
+      // Dev fallback: no Telegram context (e.g. browser preview)
+      showError("请在 Telegram 内打开此页面。\nOpen this page inside Telegram.");
+      return;
+    }
+
+    try {
+      const res  = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showError(data.error ?? "身份验证失败");
+        return;
+      }
+
+      _ssId = data.ssId ?? "";
+
+      // Update UI
+      document.getElementById("user-label").textContent =
+        `👤 ${data.firstName || "用户"}`;
+
+      if (data.ssUrl) {
+        const link = document.getElementById("ss-link");
+        link.href = data.ssUrl;
+        link.style.display = "inline-flex";
+      }
+
+      hide("loading");
+      show("app");
+
+      await loadKeywords();
+    } catch (err) {
+      showError("网络错误，请稍后重试。\n" + (err?.message ?? ""));
+    }
+  }
+
+  // ── Keywords CRUD ──────────────────────────────────────────────────────────
+
+  async function loadKeywords() {
+    if (!_ssId) { setStatus("未找到电子表格", "error"); return; }
+    setStatus("加载中…");
+
+    try {
+      const res  = await fetch(`/api/keywords?ssId=${encodeURIComponent(_ssId)}`);
+      const data = await res.json();
+
+      if (!res.ok) { setStatus(data.error ?? "加载失败", "error"); return; }
+
+      renderRows(data.rows ?? []);
+      setStatus(data.rows?.length
+        ? `已加载 ${data.rows.length} 条关键词`
+        : "暂无关键词", "ok");
+    } catch (err) {
+      setStatus("网络错误：" + (err?.message ?? ""), "error");
+    }
+  }
+
+  function renderRows(rows) {
+    const body = document.getElementById("kw-body");
+    body.innerHTML = "";
+
+    if (!rows.length) {
+      body.innerHTML =
+        '<tr id="empty-row"><td colspan="5">暂无关键词，点击「添加」开始设置</td></tr>';
+      return;
+    }
+
+    rows.forEach((r, i) => appendRow(r, i));
+  }
+
+  function appendRow(r, idx) {
+    const body = document.getElementById("kw-body");
+    const empty = document.getElementById("empty-row");
+    if (empty) empty.remove();
+
+    const tr = document.createElement("tr");
+    tr.dataset.idx = String(idx ?? body.rows.length);
+    tr.innerHTML = `
+      <td class="col-kw">
+        <input type="text" placeholder="关键词" value="${esc(r?.keyword ?? "")}" />
+      </td>
+      <td class="col-reply">
+        <textarea rows="2" placeholder="回复内容">${esc(r?.reply ?? "")}</textarea>
+      </td>
+      <td class="col-audio">
+        <input type="url" placeholder="https://…" value="${esc(r?.audioUrl ?? "")}" />
+      </td>
+      <td class="col-notes">
+        <input type="text" placeholder="备注" value="${esc(r?.notes ?? "")}" />
+      </td>
+      <td class="col-del">
+        <button class="btn-del" title="删除" onclick="deleteRow(this)">✕</button>
+      </td>
+    `;
+    body.appendChild(tr);
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g,"&amp;")
+      .replace(/"/g,"&quot;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;");
+  }
+
+  window.addRow = function () {
+    appendRow({});
+    // Scroll to new row
+    const body  = document.getElementById("kw-body");
+    const lastTr = body.lastElementChild;
+    lastTr?.scrollIntoView({ behavior: "smooth", block: "end" });
+    lastTr?.querySelector("input")?.focus();
+  };
+
+  window.deleteRow = function (btn) {
+    const tr = btn.closest("tr");
+    tr.remove();
+    const body = document.getElementById("kw-body");
+    if (!body.rows.length) {
+      body.innerHTML =
+        '<tr id="empty-row"><td colspan="5">暂无关键词，点击「添加」开始设置</td></tr>';
+    }
+    setStatus("已删除（未保存）");
+  };
+
+  async function saveKeywords() {
+    if (!_ssId)   { setStatus("未找到电子表格", "error"); return; }
+    if (_saving)  { return; }
+    _saving = true;
+
+    const body = document.getElementById("kw-body");
+    const trs  = Array.from(body.querySelectorAll("tr:not(#empty-row)"));
+
+    const rows = trs.map(tr => {
+      const inputs    = tr.querySelectorAll("input, textarea");
+      return {
+        keyword:  inputs[0]?.value?.trim() ?? "",
+        reply:    inputs[1]?.value?.trim() ?? "",
+        audioUrl: inputs[2]?.value?.trim() ?? "",
+        notes:    inputs[3]?.value?.trim() ?? "",
+      };
+    }).filter(r => r.keyword || r.reply); // skip completely blank rows
+
+    setStatus("保存中…");
+
+    try {
+      const res  = await fetch("/api/keywords", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssId: _ssId, rows }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) { setStatus(data.error ?? "保存失败", "error"); }
+      else         { setStatus(`✅ 已保存 ${data.saved} 条关键词`, "ok"); }
+    } catch (err) {
+      setStatus("网络错误：" + (err?.message ?? ""), "error");
+    } finally {
+      _saving = false;
+    }
+  }
+
+  // Expose to HTML onclick
+  window.loadKeywords  = loadKeywords;
+  window.saveKeywords  = saveKeywords;
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  authenticate();
+})();
+</script>
+</body>
+</html>

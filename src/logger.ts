@@ -25,7 +25,6 @@ import { getGoogleAuth, isGoogleConfigured } from "./gauth.js";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const LOGS_SHEET_NAME = "Logs";
-const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID ?? "";
 const TIMEZONE = "Asia/Kuala_Lumpur"; // GMT+8
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -55,7 +54,7 @@ export interface LogEntry {
 // ─── Module state ─────────────────────────────────────────────────────────────
 
 let sheetsClient: sheets_v4.Sheets | null = null;
-let logsSheetEnsured = false; // true once we've verified/created the sheet
+const logsSheetEnsuredSet = new Set<string>(); // tracks which ssIds have been set up
 let disabledUntil = 0;
 let disableReason: string | null = null;
 
@@ -121,12 +120,12 @@ function shortConn(id: string): string {
  * Ensure the "Logs" sheet exists. If not, create it and write the header row.
  * Result is cached so this only hits the API once per bot session.
  */
-async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
-  if (logsSheetEnsured) return;
+async function ensureLogsSheet(client: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
+  if (logsSheetEnsuredSet.has(spreadsheetId)) return;
 
   // Fetch all sheet metadata
   const meta = await client.spreadsheets.get({
-    spreadsheetId: SPREADSHEET_ID,
+    spreadsheetId,
     fields: "sheets.properties.title",
   });
 
@@ -137,7 +136,7 @@ async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
   if (!titles.includes(LOGS_SHEET_NAME)) {
     // Create the Logs sheet
     await client.spreadsheets.batchUpdate({
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId,
       requestBody: {
         requests: [
           {
@@ -154,7 +153,7 @@ async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
 
     // Write header row
     await client.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId,
       range: `${LOGS_SHEET_NAME}!A1:G1`,
       valueInputOption: "RAW",
       requestBody: {
@@ -173,7 +172,7 @@ async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
     console.log(`[logger] ✅ Created "${LOGS_SHEET_NAME}" sheet with headers.`);
   }
 
-  logsSheetEnsured = true;
+  logsSheetEnsuredSet.add(spreadsheetId);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -182,15 +181,15 @@ async function ensureLogsSheet(client: sheets_v4.Sheets): Promise<void> {
  * Append one row to the Logs sheet.
  * This function is FIRE-AND-FORGET — call without await to avoid blocking.
  */
-export async function logMessage(entry: LogEntry): Promise<void> {
-  if (!isGoogleConfigured()) return;
+export async function logMessage(entry: LogEntry, spreadsheetId: string): Promise<void> {
+  if (!spreadsheetId || !isGoogleConfigured()) return;
   if (Date.now() < disabledUntil) return;
 
   const client = getClient();
   if (!client) return;
 
   try {
-    await ensureLogsSheet(client);
+    await ensureLogsSheet(client, spreadsheetId);
 
     const timestamp = formatTimestamp(new Date());
     const row = [
@@ -204,7 +203,7 @@ export async function logMessage(entry: LogEntry): Promise<void> {
     ];
 
     await client.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId,
       range: `${LOGS_SHEET_NAME}!A:G`,
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",

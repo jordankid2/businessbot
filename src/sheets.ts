@@ -61,22 +61,35 @@ export interface KeywordMatch {
 
 // ─── Configuration from env ───────────────────────────────────────────────────
 
-const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID ?? "";
 const SHEET_NAME = process.env.GOOGLE_SHEET_NAME ?? "Keywords";
 const CACHE_TTL_MS = parseInt(
   process.env.SHEETS_CACHE_TTL_MS ?? String(5 * 60 * 1000),
   10
 );
 
-// ─── Module-level state ───────────────────────────────────────────────────────
+// ─── Per-user cache ───────────────────────────────────────────────────────────
+
+interface UserSheetState {
+  rows: KeywordRow[] | null;
+  expiresAt: number;
+  disabledUntil: number;
+  disabledReason: "permission" | "transient" | null;
+}
 
 let sheetsClient: sheets_v4.Sheets | null = null;
-let cache: KeywordRow[] | null = null;
-let cacheExpiresAt = 0;
 let configWarned = false;
-let fetchDisabledUntil = 0;
-let fetchDisabledReason: "permission" | "transient" | null = null;
 
+// Keyed by spreadsheetId
+const _stateMap = new Map<string, UserSheetState>();
+
+function getState(ssId: string): UserSheetState {
+  let s = _stateMap.get(ssId);
+  if (!s) {
+    s = { rows: null, expiresAt: 0, disabledUntil: 0, disabledReason: null };
+    _stateMap.set(ssId, s);
+  }
+  return s;
+}
 const PERMISSION_BACKOFF_MS = 15 * 60 * 1000;
 const TRANSIENT_BACKOFF_MS = 60 * 1000;
 
@@ -130,15 +143,14 @@ function getSheetsClient(): sheets_v4.Sheets | null {
 
 // ─── Fetch & parse ────────────────────────────────────────────────────────────
 
-async function fetchRows(): Promise<KeywordRow[]> {
+async function fetchRows(ssId: string): Promise<KeywordRow[]> {
   const client = getSheetsClient();
   if (!client) return [];
 
-  // range = SheetName!A2:C  (skip header row 1; A=keywords, B=reply, C=audio URL)
   const range = `${SHEET_NAME}!A2:C`;
 
   const response = await client.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
+    spreadsheetId: ssId,
     range,
     valueRenderOption: "FORMATTED_VALUE",
   });
@@ -148,18 +160,14 @@ async function fetchRows(): Promise<KeywordRow[]> {
 
   for (const row of rows) {
     const keywordCell = (row[0] as string | undefined)?.trim() ?? "";
-    const replyCell = (row[1] as string | undefined)?.trim() ?? "";
+    const replyCell   = (row[1] as string | undefined)?.trim() ?? "";
     const audioUrlCell = (row[2] as string | undefined)?.trim() ?? "";
-
-    if (!keywordCell || !replyCell) continue; // skip empty rows
-
+    if (!keywordCell || !replyCell) continue;
     const keywords = keywordCell
       .split(",")
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0);
-
     if (keywords.length === 0) continue;
-
     parsed.push({
       keywords,
       reply: replyCell,
@@ -167,70 +175,73 @@ async function fetchRows(): Promise<KeywordRow[]> {
     });
   }
 
-  console.log(`[sheets] 🔄 Loaded ${parsed.length} keyword row(s) from "${SHEET_NAME}"`);
+  console.log(`[sheets] 🔄 Loaded ${parsed.length} keyword row(s) from ss=${ssId.slice(-6)}`);
   return parsed;
 }
 
 // ─── Cache management ─────────────────────────────────────────────────────────
 
-async function getRows(): Promise<KeywordRow[]> {
-  if (Date.now() < fetchDisabledUntil) {
-    return cache ?? [];
-  }
+async function getRows(ssId: string): Promise<KeywordRow[]> {
+  const s = getState(ssId);
 
-  if (cache !== null && Date.now() < cacheExpiresAt) {
-    return cache;
-  }
+  if (Date.now() < s.disabledUntil) return s.rows ?? [];
+  if (s.rows !== null && Date.now() < s.expiresAt) return s.rows;
 
   try {
-    cache = await fetchRows();
-    cacheExpiresAt = Date.now() + CACHE_TTL_MS;
+    s.rows = await fetchRows(ssId);
+    s.expiresAt = Date.now() + CACHE_TTL_MS;
+    s.disabledReason = null;
   } catch (err) {
     const details = extractGoogleError(err);
-
     if (details.status === 403 || details.code === 403) {
-      fetchDisabledUntil = Date.now() + PERMISSION_BACKOFF_MS;
-      if (fetchDisabledReason !== "permission") {
-        fetchDisabledReason = "permission";
+      s.disabledUntil = Date.now() + PERMISSION_BACKOFF_MS;
+      if (s.disabledReason !== "permission") {
+        s.disabledReason = "permission";
         console.warn(
-          `[sheets] ⚠️ Permission denied (403). ` +
-          `Keyword lookup paused for ${Math.floor(PERMISSION_BACKOFF_MS / 60000)} min. ` +
-          `Share sheet with service account as Viewer or Editor.`
+          `[sheets] ⚠️ Permission denied (403) for ss=${ssId.slice(-6)}. ` +
+          `Keyword lookup paused ${Math.floor(PERMISSION_BACKOFF_MS / 60000)} min.`
         );
       }
     } else {
-      fetchDisabledUntil = Date.now() + TRANSIENT_BACKOFF_MS;
-      if (fetchDisabledReason !== "transient") {
-        fetchDisabledReason = "transient";
-        console.warn(`[sheets] ⚠️ Keyword lookup temporarily unavailable: ${details.message}`);
+      s.disabledUntil = Date.now() + TRANSIENT_BACKOFF_MS;
+      if (s.disabledReason !== "transient") {
+        s.disabledReason = "transient";
+        console.warn(`[sheets] ⚠️ Keyword lookup temporarily unavailable (ss=${ssId.slice(-6)}): ${details.message}`);
       }
     }
-
-    // Return stale cache if available, empty array otherwise
-    cache = cache ?? [];
+    s.rows = s.rows ?? [];
   }
 
-  return cache;
+  return s.rows;
 }
 
-/** Force-invalidate the cache so the next lookup re-fetches from Sheets. */
-export function invalidateCache(): void {
-  cacheExpiresAt = 0;
-  console.log("[sheets] 🗑  Cache invalidated — will re-fetch on next message.");
+/** Force-invalidate cache for one (or all) user spreadsheets. */
+export function invalidateCache(ssId?: string): void {
+  if (ssId) {
+    const s = _stateMap.get(ssId);
+    if (s) s.expiresAt = 0;
+    console.log(`[sheets] 🗑  Cache invalidated for ss=${ssId.slice(-6)}`);
+  } else {
+    _stateMap.forEach(s => { s.expiresAt = 0; });
+    console.log("[sheets] 🗑  All keyword caches invalidated");
+  }
 }
 
 // ─── Public lookup API ────────────────────────────────────────────────────────
 
 /**
- * Check whether `userMessage` contains any preset keyword.
+ * Check whether `userMessage` contains any preset keyword for this owner's spreadsheet.
  *
- * @returns A KeywordMatch object if a keyword matched (includes optional audioUrl),
- *          or `null` if none matched (meaning the AI should handle the message).
+ * @param userMessage  The customer's raw message text
+ * @param ssId         The owner's spreadsheet ID (from registry)
+ * @returns A KeywordMatch if found, or null (→ use AI)
  */
 export async function findKeywordReply(
-  userMessage: string
+  userMessage: string,
+  ssId: string
 ): Promise<KeywordMatch | null> {
-  const rows = await getRows();
+  if (!ssId) return null;
+  const rows = await getRows(ssId);
   if (rows.length === 0) return null;
 
   const lowerMsg = userMessage.toLowerCase();
@@ -239,8 +250,7 @@ export async function findKeywordReply(
     for (const kw of row.keywords) {
       if (lowerMsg.includes(kw)) {
         console.log(
-          `[sheets] ✅ Keyword match: "${kw}" → preset reply${row.audioUrl ? " + audio" : ""
-          }`
+          `[sheets] ✅ Keyword match: "${kw}" → preset reply${row.audioUrl ? " + audio" : ""}`
         );
         return { reply: row.reply, audioUrl: row.audioUrl };
       }

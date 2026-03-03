@@ -11,6 +11,7 @@ import { detectAndLogGender } from "./gender.js";
 import { registerOwnerReply, isHumanTakeover, activeTakeoverCount,
          pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
 import { generateLoginToken } from "./tokens.js";
+import { getOrProvisionUserSheet } from "./registry.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -130,15 +131,18 @@ function handleBusinessApiError(err: unknown, connectionId: string): void {
  */
 bot.on("business_connection", async (ctx) => {
   const conn = ctx.businessConnection;
-  // Persist in cache (or remove if disabled)
   upsertConnection(conn);
 
-  if (!conn.is_enabled) {
-    // Connection was paused or fully removed — clear all history for this connection
-    // We don't have a per-connection clear, but we log it clearly
-    console.log(
-      `[business] ⚠️  Connection disabled  id=${conn.id}  owner=${conn.user.id}`
+  if (conn.is_enabled) {
+    console.log(`[business] \u2705  Connection enabled  id=${conn.id}  owner=${conn.user.id}`);
+    // Pre-provision user spreadsheet so first message is faster
+    void getOrProvisionUserSheet(
+      conn.user.id,
+      conn.user.username ?? "",
+      conn.user.first_name ?? ""
     );
+  } else {
+    console.log(`[business] \u26a0\ufe0f  Connection disabled  id=${conn.id}  owner=${conn.user.id}`);
   }
 });
 
@@ -182,6 +186,11 @@ bot.on("business_message", async (ctx) => {
   // would create an infinite loop or duplicate reply visible to the customer.
   // We log the owner's message as OUT (人工回复) for a complete chat history.
   const ownerUserId = getOwnerUserId(connectionId);
+
+  // ── Look up owner's per-user spreadsheet (multi-tenant) ────────────────────
+  const ownerSsId = ownerUserId !== undefined
+    ? (await getOrProvisionUserSheet(ownerUserId) ?? "")
+    : "";
   if (msg.from && ownerUserId !== undefined && msg.from.id === ownerUserId) {
     console.log(
       `[business] 🙋  Owner manual reply  conn=${connectionId}  "${msg.text?.slice(0, 60) ?? "[non-text]"}"`
@@ -217,7 +226,7 @@ bot.on("business_message", async (ctx) => {
       connectionId,
       text: ownerMsgText,
       replyType: "人工回复",
-    });
+    }, ownerSsId);
     return; // ← bot never auto-replies to owner's own messages
   }
 
@@ -236,7 +245,7 @@ bot.on("business_message", async (ctx) => {
     void logMessage({
       direction: "IN", customerId: msg.chat.id, customerName, connectionId,
       text: `[${mediaType}消息 ${duration}秒]`, replyType: "",
-    });
+    }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
       const transcription = await transcribeVoice(mediaFile.file_id, BOT_TOKEN);
@@ -246,25 +255,25 @@ bot.on("business_message", async (ctx) => {
         await ctx.api.sendMessage(msg.chat.id, noAudio, { business_connection_id: connectionId });
         return;
       }
-      const kwMatch = await findKeywordReply(transcription);
+      const kwMatch = await findKeywordReply(transcription, ownerSsId);
       if (kwMatch !== null) {
         await sleep(BOT_REPLY_DELAY_MS);
         if (isHumanTakeover(connectionId, msg.chat.id)) return;
         if (kwMatch.audioUrl) {
           await ctx.api.sendVoice(msg.chat.id, kwMatch.audioUrl, { business_connection_id: connectionId });
-          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音" });
+          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音" }, ownerSsId);
         } else {
           await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, { business_connection_id: connectionId });
-          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: kwMatch.reply, replyType: "预设关键词" });
+          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: kwMatch.reply, replyType: "预设关键词" }, ownerSsId);
         }
         return;
       }
-      void detectAndLogGender(msg.chat, customerName);
+      void detectAndLogGender(msg.chat, customerName, ownerSsId);
       const aiReply = await chat(key, `[语音转文字] ${transcription}`, systemPrompt);
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI语音理解" });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI语音理解" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 语音处理失败，请重试。\nVoice processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -275,20 +284,20 @@ bot.on("business_message", async (ctx) => {
   // ── Photo ──────────────────────────────────────────────────────────────────
   if (msg.photo && msg.photo.length > 0) {
     const largest = msg.photo[msg.photo.length - 1];
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" });
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
       const visionPrompt =
         "你是专业客服AI。客户发送了这张图片。请分析图片内容，判断它是否与商业咨询有关。" +
         "如果有关，请给出有帮助的回应；如果看不懂客户意图，请礼貌询问客户想表达什么。" +
         "请用中英双语回答，语言自然简洁。";
-      void detectAndLogGender(msg.chat, customerName);
+      void detectAndLogGender(msg.chat, customerName, ownerSsId);
       const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[图片内容] ${imageDesc}`, systemPrompt);
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI图片分析" });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI图片分析" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 图片分析失败，请重试。\nImage analysis failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -300,20 +309,20 @@ bot.on("business_message", async (ctx) => {
   if (msg.video || msg.video_note) {
     const thumbFileId =
       msg.video?.thumbnail?.file_id ?? msg.video_note?.thumbnail?.file_id;
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" });
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
       const visionPrompt =
         "你是专业客服AI。客户发送了一段视频（以下为视频缩略图）。" +
         "请判断视频内容是否与商业咨询相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。" +
         "请用中英双语回答。";
-      void detectAndLogGender(msg.chat, customerName);
+      void detectAndLogGender(msg.chat, customerName, ownerSsId);
       const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[视频内容] ${videoDesc}`, systemPrompt);
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI视频分析" });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI视频分析" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 视频处理失败，请重试。\nVideo processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -324,7 +333,7 @@ bot.on("business_message", async (ctx) => {
   // ── Document / File (metadata only — never downloaded) ────────────────────
   if (msg.document) {
     const doc = msg.document;
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: `[文件: ${doc.file_name ?? "unknown"}]`, replyType: "" });
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: `[\u6587\u4ef6: ${doc.file_name ?? "unknown"}]`, replyType: "" }, ownerSsId);
     const assessment = assessFileRisk({
       file_name: doc.file_name,
       mime_type: doc.mime_type,
@@ -334,7 +343,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) return;
       await ctx.api.sendMessage(msg.chat.id, assessment, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "文件安全提示" });
+      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "文件安全提示" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
     }
@@ -346,7 +355,7 @@ bot.on("business_message", async (ctx) => {
 
   if (!text) {
     // Unsupported media type (sticker, contact, location, etc.)
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[其他类型消息]", replyType: "" });
+    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[其他类型消息]", replyType: "" }, ownerSsId);
     const unsupportedReply =
       "抱歉，我暂时无法处理这种类型的消息，请用文字描述您的需求。😊\n" +
       "Sorry, I can't process this message type. Please describe your needs in text. 😊";
@@ -371,7 +380,7 @@ bot.on("business_message", async (ctx) => {
     connectionId,
     text,
     replyType: "",
-  });
+  }, ownerSsId);
 
   // ── Human takeover check ─────────────────────────────────────────────────
   // If the owner has recently sent a manual reply in this chat, we yield to
@@ -392,7 +401,7 @@ bot.on("business_message", async (ctx) => {
 
   try {
     // ── Step 1: Check Google Sheets for a preset keyword reply ───────────────
-    const kwMatch = await findKeywordReply(text);
+    const kwMatch = await findKeywordReply(text, ownerSsId);
 
     if (kwMatch !== null) {
       // Keyword matched — apply grace-period delay then re-check takeover
@@ -409,7 +418,7 @@ bot.on("business_message", async (ctx) => {
         void logMessage({
           direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
           text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音",
-        });
+        }, ownerSsId);
       } else {
         await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, {
           business_connection_id: connectionId,
@@ -417,18 +426,18 @@ bot.on("business_message", async (ctx) => {
         void logMessage({
           direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
           text: kwMatch.reply, replyType: "预设关键词",
-        });
+        }, ownerSsId);
       }
       return;
     }
 
     // ── Step 2: No keyword match — let AI handle the message ─────────────────
-    void detectAndLogGender(msg.chat, customerName);
+    void detectAndLogGender(msg.chat, customerName, ownerSsId);
     const aiReply = await chat(key, text, systemPrompt);
     // Apply grace-period delay then re-check takeover before sending
     await sleep(BOT_REPLY_DELAY_MS);
     if (isHumanTakeover(connectionId, msg.chat.id)) {
-      console.log(`[takeover] 🤫  Aborted AI reply  conn=${connectionId}  chat=${msg.chat.id}`);
+      console.log(`[takeover] \ud83e\udd2b  Aborted AI reply  conn=${connectionId}  chat=${msg.chat.id}`);
       return;
     }
     await ctx.api.sendMessage(msg.chat.id, aiReply, {
@@ -440,8 +449,8 @@ bot.on("business_message", async (ctx) => {
       customerName,
       connectionId,
       text: aiReply,
-      replyType: "AI生成",
-    });
+      replyType: "AI\u751f\u6210",
+    }, ownerSsId);
   } catch (err) {
     handleBusinessApiError(err, connectionId);
     try {
@@ -674,7 +683,7 @@ bot.on("message:text", async (ctx) => {
 
   try {
     // ── Step 1: Check Google Sheets for a preset keyword reply ───────────────
-    const kwMatch = await findKeywordReply(text);
+    const kwMatch = await findKeywordReply(text, ""); // no owner context in direct messages
     if (kwMatch !== null) {
       if (kwMatch.audioUrl) {
         await ctx.replyWithVoice(kwMatch.audioUrl);
@@ -785,5 +794,10 @@ async function startWithRetry(
   console.error("[bot] ❌  Could not connect after max retries — exiting.");
   process.exit(1);
 }
+
+import { startServer } from "./server.js";
+
+// Start Express Mini App server (runs alongside the bot's long-polling)
+startServer();
 
 void startWithRetry();

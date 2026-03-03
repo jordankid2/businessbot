@@ -97,11 +97,11 @@ async function inferGender(
 
 // ─── Google Sheets — Users sheet ─────────────────────────────────────────────
 
-const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID ?? "";
 const USERS_SHEET_NAME = "Users";
 
 let sheetsClient: sheets_v4.Sheets | null = null;
 let sheetsDisabledUntil = 0;
+const usersSheetEnsured = new Set<string>(); // tracks per-ssId
 
 function getSheetsClient(): sheets_v4.Sheets | null {
   if (sheetsClient) return sheetsClient;
@@ -119,56 +119,56 @@ function nowStr(): string {
 /**
  * Ensure "Users" sheet exists; create it with a header row if needed.
  */
-async function ensureUsersSheet(client: sheets_v4.Sheets): Promise<void> {
+async function ensureUsersSheet(client: sheets_v4.Sheets, ssId: string): Promise<void> {
+  if (usersSheetEnsured.has(ssId)) return;
   const meta = await client.spreadsheets.get({
-    spreadsheetId: SPREADSHEET_ID,
+    spreadsheetId: ssId,
     fields: "sheets.properties.title",
   });
   const exists = (meta.data.sheets ?? []).some(
     (s) => s.properties?.title === USERS_SHEET_NAME
   );
-  if (exists) return;
-
-  // Create the sheet
-  await client.spreadsheets.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
+  if (!exists) {
+    // Create the sheet
+    await client.spreadsheets.batchUpdate({
+      spreadsheetId: ssId,
     requestBody: {
       requests: [{ addSheet: { properties: { title: USERS_SHEET_NAME } } }],
     },
   });
 
-  // Write header row
-  await client.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${USERS_SHEET_NAME}!A1:F1`,
-    valueInputOption: "RAW",
-    requestBody: {
-      values: [
-        ["Customer ID", "Name", "Gender", "First Seen", "Last Seen", "Messages"],
-      ],
-    },
-  });
-
-  console.log(`[gender] 📋 Created "${USERS_SHEET_NAME}" sheet.`);
+    await client.spreadsheets.values.update({
+      spreadsheetId: ssId,
+      range: `${USERS_SHEET_NAME}!A1:F1`,
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [
+          ["Customer ID", "Name", "Gender", "First Seen", "Last Seen", "Messages"],
+        ],
+      },
+    });
+    console.log(`[gender] Created "${USERS_SHEET_NAME}" sheet in ss=${ssId.slice(-6)}.`);
+  }
+  usersSheetEnsured.add(ssId);
 }
 
 /**
  * Upsert a row in the Users sheet for this customer.
  * If the customer already has a row, update Last Seen + increment message count.
  */
-async function upsertUserRow(profile: CustomerProfile): Promise<void> {
+async function upsertUserRow(profile: CustomerProfile, ssId: string): Promise<void> {
   if (Date.now() < sheetsDisabledUntil) return;
-  if (!SPREADSHEET_ID) return;
+  if (!ssId) return;
 
   const client = getSheetsClient();
   if (!client) return;
 
   try {
-    await ensureUsersSheet(client);
+    await ensureUsersSheet(client, ssId);
 
     // Read existing rows (A2:F) to find this customer
     const resp = await client.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId: ssId,
       range: `${USERS_SHEET_NAME}!A2:F`,
     });
 
@@ -180,9 +180,9 @@ async function upsertUserRow(profile: CustomerProfile): Promise<void> {
     const now = nowStr();
 
     if (rowIndex === -1) {
-      // New customer — append row
+      // New customer
       await client.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
+        spreadsheetId: ssId,
         range: `${USERS_SHEET_NAME}!A:F`,
         valueInputOption: "RAW",
         insertDataOption: "INSERT_ROWS",
@@ -199,15 +199,13 @@ async function upsertUserRow(profile: CustomerProfile): Promise<void> {
           ],
         },
       });
-      console.log(
-        `[gender] 👤 New user logged  id=${profile.customerId}  gender=${profile.gender}`
-      );
+      console.log(`[gender] New user id=${profile.customerId} gender=${profile.gender}`);
     } else {
-      // Existing — update Last Seen and message count (rowIndex is 0-based in array → sheet row = rowIndex+2)
+      // Existing
       const sheetRow = rowIndex + 2;
       const prevCount = parseInt(rows[rowIndex][5] ?? "0", 10);
       await client.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
+        spreadsheetId: ssId,
         range: `${USERS_SHEET_NAME}!B${sheetRow}:F${sheetRow}`,
         valueInputOption: "RAW",
         requestBody: {
@@ -228,10 +226,10 @@ async function upsertUserRow(profile: CustomerProfile): Promise<void> {
       (err as { status?: number; code?: number })?.code;
     if (status === 403) {
       sheetsDisabledUntil = Date.now() + 15 * 60 * 1000;
-      console.warn("[gender] ⚠️ 403 writing to Users sheet — paused 15 min.");
+      console.warn(`[gender] 403 Users sheet ss=${ssId.slice(-6)} paused 15 min.`);
     } else {
       sheetsDisabledUntil = Date.now() + 60 * 1000;
-      console.warn("[gender] ⚠️ Error writing Users sheet:", (err as Error)?.message);
+      console.warn("[gender] Error writing Users sheet:", (err as Error)?.message);
     }
   }
 }
@@ -252,18 +250,15 @@ export interface TelegramChat {
  */
 export async function detectAndLogGender(
   chat: TelegramChat,
-  customerName: string
+  customerName: string,
+  spreadsheetId: string
 ): Promise<void> {
   const firstName = chat.first_name ?? chat.username ?? "";
-  const lastName = chat.last_name;
+  const lastName  = chat.last_name;
 
   const gender = await inferGender(chat.id, firstName, lastName);
 
-  const profile: CustomerProfile = {
-    customerId: chat.id,
-    customerName,
-    gender,
-  };
+  const profile: CustomerProfile = { customerId: chat.id, customerName, gender };
 
-  await upsertUserRow(profile);
+  await upsertUserRow(profile, spreadsheetId);
 }
