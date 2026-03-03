@@ -4,7 +4,11 @@ builder = "dockerfile"
 [deploy]
 # Only one replica — Telegram long-polling must have a single consumer.
 numReplicas = 1
-# Restart automatically on non-zero exit (e.g. network loss).
-# Exit code 0 (graceful 409 handling) will NOT trigger a restart.
+# Railway sends SIGTERM to old container when new one starts.
+# Our bot handles SIGTERM and stops polling immediately (see bot.ts),
+# so the 409 window is minimised to just the container startup time.
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
+# Give Railway 10 s to declare the new container healthy, then kill the old one.
+# Reduces the overlap window where two instances poll simultaneously.
+healthcheckTimeout = 10

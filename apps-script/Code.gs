@@ -38,7 +38,7 @@ function doGet(e) {
   template.userId = e.parameter.id || '';
   template.authData = JSON.stringify(e.parameters); // pass all Telegram auth params
   return template.evaluate()
-    .setTitle('OpenClaw — Keyword Manager')
+    .setTitle('zznet — Keyword Manager')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
@@ -46,11 +46,11 @@ function doGet(e) {
 // ─── Script Properties helpers ────────────────────────────────────────────────
 
 function getBotToken_() {
-  return PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '';
+  return PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '8657904700:AAFP7QDz9loBoiYXXsyzRuis456doNNxPm4';
 }
 
 function getBotUsername_() {
-  return PropertiesService.getScriptProperties().getProperty('BOT_USERNAME') || 'YourBotUsername';
+  return PropertiesService.getScriptProperties().getProperty('BOT_USERNAME') || 'auto_csbot';
 }
 
 // ─── Telegram auth verification ───────────────────────────────────────────────

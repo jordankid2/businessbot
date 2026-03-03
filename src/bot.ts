@@ -679,6 +679,17 @@ bot.catch((err) => {
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
+// Graceful shutdown: when Railway stops the old container (SIGTERM) we must
+// stop polling immediately so the NEW container can take over without 409.
+process.once("SIGTERM", () => {
+  console.log("[bot] 🛑  SIGTERM received — stopping gracefully…");
+  bot.stop().finally(() => process.exit(0));
+});
+process.once("SIGINT", () => {
+  console.log("[bot] 🛑  SIGINT received — stopping gracefully…");
+  bot.stop().finally(() => process.exit(0));
+});
+
 /**
  * Railway rolling deployments briefly run two containers simultaneously.
  * The new container gets a 409 from Telegram (old one still polling).
