@@ -1,5 +1,5 @@
 /**
- * OpenClaw Keyword Manager — Google Apps Script Backend
+ * zznet Bot Keyword Manager — Google Apps Script Backend
  *
  * This script is attached to the master management Google Spreadsheet.
  * It provides a web app that:
@@ -57,11 +57,11 @@ function getBotUsername_() {
 
 /**
  * Runs automatically when the spreadsheet is opened.
- * Adds the "🤖 OpenClaw Bot" menu to the spreadsheet toolbar.
+ * Adds the "🤖 zznet Bot" menu to the spreadsheet toolbar.
  */
 function onOpen() {
   SpreadsheetApp.getUi()
-    .createMenu('🤖 OpenClaw Bot')
+    .createMenu('🤖 zznet Bot')
     .addItem('🔑 Set Bot Token', 'menuSetBotToken')
     .addItem('👤 Set Bot Username', 'menuSetBotUsername')
     .addSeparator()
@@ -143,7 +143,7 @@ function menuCheckConfig() {
   const usernameStatus = username ? '✅ @' + username : '❌ Not set';
   const urlStatus = webUrl ? '✅ Deployed' : '❌ Not deployed';
 
-  let msg = '⚙️ OpenClaw Bot Configuration\n\n';
+  let msg = '⚙️ zznet Bot Configuration\n\n';
   msg += 'Bot Token:    ' + tokenStatus + '\n';
   msg += 'Bot Username: ' + usernameStatus + '\n';
   msg += 'Web App URL:  ' + urlStatus + '\n';
@@ -285,7 +285,7 @@ function findCustomer_(telegramId) {
  * @returns {Object} { spreadsheetId, spreadsheetUrl }
  */
 function provisionSpreadsheet_(telegramId, username, firstName, email) {
-  const title = `OpenClaw Keywords — ${firstName || username || telegramId}`;
+  const title = `zznet Bot Keywords — ${firstName || username || telegramId}`;
   const ss = SpreadsheetApp.create(title);
   const ssId = ss.getId();
   const ssUrl = ss.getUrl();
