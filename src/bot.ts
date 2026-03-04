@@ -210,18 +210,6 @@ bot.on("business_message", async (ctx) => {
     return;
   }
 
-  // ── Owner self-message check ──────────────────────────────────────────────
-  // When the business owner manually types a reply, the bot still receives
-  // the message as a business_message update. We must NOT auto-reply — that
-  // would create an infinite loop or duplicate reply visible to the customer.
-  // We log the owner's message as OUT (人工回复) for a complete chat history.
-  const ownerUserId = getOwnerUserId(connectionId);
-
-  // ── Look up admin's per-user spreadsheet (multi-tenant) ────────────────────
-  const ownerSsId = ownerUserId !== undefined
-    ? (await getOrProvisionUserSheet(ownerUserId) ?? "")
-    : "";
-
   // ── Only handle 1-on-1 private chats ────────────────────────────────────────
   if (msg.chat.type !== "private") {
     console.log(
@@ -230,9 +218,39 @@ bot.on("business_message", async (ctx) => {
     return;
   }
 
-  // ── Load admin's custom system prompt ─────────────────────────────────────
+  // ── Sender identity gate ───────────────────────────────────────────────────
+  // Every message MUST have a known sender (msg.from). Without it we cannot
+  // distinguish owner-sent from customer-sent, so we skip entirely.
+  if (!msg.from) {
+    console.log(`[business] ⏭️  No sender (msg.from missing)  conn=${connectionId} — skipped`);
+    return;
+  }
+
+  // ── Owner lookup ──────────────────────────────────────────────────────────
+  // getOwnerUserId may return undefined after a bot restart (connection cache
+  // lost). In that case we cannot safely determine if this is an owner message
+  // or a customer message, so we refuse to process it (avoids replying to the
+  // owner's own messages).
+  const ownerUserId = getOwnerUserId(connectionId);
+  if (ownerUserId === undefined) {
+    console.warn(
+      `[business] ⚠️  Owner unknown for conn=${connectionId} — skipping until business_connection re-fires`
+    );
+    return;
+  }
+
+  // ── Owner self-message check ───────────────────────────────────────────────
+  // The bot receives the owner's OWN outgoing messages as business_message
+  // updates. We MUST NOT auto-reply to them (loop + duplicate visible to customer).
+  // Log as OUT for CRM completeness, then return immediately.
+
+  // Resolve admin's spreadsheet (needed by both the log block and the AI block below)
+  const ownerSsId = await getOrProvisionUserSheet(ownerUserId) ?? "";
+
+  // Load admin's custom system prompt (needed for customer AI replies below)
   const adminSystemPrompt = await getAdminPrompt(ownerSsId);
-  if (msg.from && ownerUserId !== undefined && msg.from.id === ownerUserId) {
+
+  if (msg.from.id === ownerUserId) {
     console.log(
       `[business] 🙋  Owner manual reply  conn=${connectionId}  "${msg.text?.slice(0, 60) ?? "[non-text]"}"`
     );
