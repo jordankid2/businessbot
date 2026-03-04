@@ -839,6 +839,18 @@ async function startWithRetry(
             `grace=${OLD_UPDATE_GRACE_SECONDS}s | drop_pending_updates=${DROP_PENDING_UPDATES}`
           );
           console.log("    Modes  : Direct bot + Telegram Business chatbot\n");
+
+          // Auto-set the bot's default menu button to open the Mini App
+          const miniAppUrl = process.env.MINI_APP_URL?.trim();
+          if (miniAppUrl) {
+            bot.api.setChatMenuButton({
+              menu_button: { type: "web_app", text: "🛠 管理面板", web_app: { url: miniAppUrl } },
+            }).then(() => {
+              console.log(`[bot] ✅ Menu button → Mini App (${miniAppUrl})`);
+            }).catch((err: Error) => {
+              console.warn("[bot] ⚠️ Could not set menu button:", err.message);
+            });
+          }
         },
       });
       return; // clean exit after bot.stop() is called
