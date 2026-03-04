@@ -1,18 +1,18 @@
 /**
  * Chat Logger — Google Sheets
  *
- * Appends every business chat message (IN and OUT) to a "Logs" sheet.
+ * Appends every business chat message (来消息 and 发消息) to a "Logs" sheet.
  * The sheet is created automatically with headers if it doesn't exist yet.
  *
  * ─── Logs sheet columns ───────────────────────────────────────────────────────
  *  A  时间          Full timestamp  e.g. 2026-03-03 14:25:36  (GMT+8)
- *  B  方向          IN  = customer → us
- *                   OUT = us → customer
+ *  B  方向          来消息 = customer → us
+ *                   发消息 = us → customer
  *  C  客户ID        Telegram chat.id of the customer
  *  D  客户名        first_name + last_name / username (best effort)
  *  E  连接ID        business_connection_id (shortened to 8 chars for readability)
  *  F  消息内容      The actual message text
- *  G  回复类型      (OUT only) 预设关键词 | AI生成 | 系统消息
+ *  G  回复类型      (发消息 only) 预设回复 | AI回复 | 人工回复
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * Logging is FIRE-AND-FORGET — errors are caught and printed but never thrown,
@@ -29,16 +29,10 @@ const TIMEZONE = "Asia/Kuala_Lumpur"; // GMT+8
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type Direction = "IN" | "OUT";
+export type Direction = "来消息" | "发消息";
 export type ReplyType =
-  | "预设关键词"
-  | "预设语音"
-  | "AI生成"
-  | "AI语音理解"
-  | "AI图片分析"
-  | "AI视频分析"
-  | "文件安全提示"
-  | "系统消息"
+  | "预设回复"
+  | "AI回复"
   | "人工回复"
   | "";
 
@@ -48,7 +42,7 @@ export interface LogEntry {
   customerName: string;
   connectionId: string;
   text: string;
-  replyType?: ReplyType; // only meaningful for OUT
+  replyType?: ReplyType; // only meaningful for 发消息
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────────

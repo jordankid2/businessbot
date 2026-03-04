@@ -279,7 +279,7 @@ bot.on("business_message", async (ctx) => {
     }
     // Log owner's outgoing message for CRM completeness — no auto-reply
     void logMessage({
-      direction: "OUT",
+      direction: "发消息",
       customerId: msg.chat.id,
       customerName: buildCustomerName(msg.chat),
       connectionId,
@@ -302,7 +302,7 @@ bot.on("business_message", async (ctx) => {
     const mediaType = msg.voice ? "语音" : "音频";
     const duration = (mediaFile as { duration?: number }).duration ?? 0;
     void logMessage({
-      direction: "IN", customerId: msg.chat.id, customerName, connectionId,
+      direction: "来消息", customerId: msg.chat.id, customerName, connectionId,
       text: `[${mediaType}消息 ${duration}秒]`, replyType: "",
     }, ownerSsId);
     try {
@@ -320,10 +320,10 @@ bot.on("business_message", async (ctx) => {
         if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
         if (kwMatch.audioUrl) {
           await ctx.api.sendVoice(msg.chat.id, kwMatch.audioUrl, { business_connection_id: connectionId });
-          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音" }, ownerSsId);
+          void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: `[语音回复] ${kwMatch.reply}`, replyType: "预设回复" }, ownerSsId);
         } else {
           await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, { business_connection_id: connectionId });
-          void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: kwMatch.reply, replyType: "预设关键词" }, ownerSsId);
+          void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: kwMatch.reply, replyType: "预设回复" }, ownerSsId);
         }
         return;
       }
@@ -332,7 +332,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI语音理解" }, ownerSsId);
+      void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI回复" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 语音处理失败，请重试。\nVoice processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -343,7 +343,7 @@ bot.on("business_message", async (ctx) => {
   // ── Photo ──────────────────────────────────────────────────────────────────
   if (msg.photo && msg.photo.length > 0) {
     const largest = msg.photo[msg.photo.length - 1];
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" }, ownerSsId);
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
       const visionPrompt =
@@ -355,7 +355,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI图片分析" }, ownerSsId);
+      void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI回复" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 图片分析失败，请重试。\nImage analysis failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -367,7 +367,7 @@ bot.on("business_message", async (ctx) => {
   if (msg.video || msg.video_note) {
     const thumbFileId =
       msg.video?.thumbnail?.file_id ?? msg.video_note?.thumbnail?.file_id;
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" }, ownerSsId);
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
       const visionPrompt =
@@ -379,7 +379,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI视频分析" }, ownerSsId);
+      void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: aiReply, replyType: "AI回复" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
       try { await ctx.api.sendMessage(msg.chat.id, "⚠️ 视频处理失败，请重试。\nVideo processing failed, please try again.", { business_connection_id: connectionId }); } catch { /* ignore */ }
@@ -390,7 +390,7 @@ bot.on("business_message", async (ctx) => {
   // ── Document / File (metadata only — never downloaded) ────────────────────
   if (msg.document) {
     const doc = msg.document;
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: `[\u6587\u4ef6: ${doc.file_name ?? "unknown"}]`, replyType: "" }, ownerSsId);
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: `[文件: ${doc.file_name ?? "unknown"}]`, replyType: "" }, ownerSsId);
     const assessment = assessFileRisk({
       file_name: doc.file_name,
       mime_type: doc.mime_type,
@@ -400,7 +400,7 @@ bot.on("business_message", async (ctx) => {
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, assessment, { business_connection_id: connectionId });
-      void logMessage({ direction: "OUT", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "文件安全提示" }, ownerSsId);
+      void logMessage({ direction: "发消息", customerId: msg.chat.id, customerName, connectionId, text: assessment, replyType: "AI回复" }, ownerSsId);
     } catch (err) {
       handleBusinessApiError(err, connectionId);
     }
@@ -412,7 +412,7 @@ bot.on("business_message", async (ctx) => {
 
   if (!text) {
     // Unsupported media type (sticker, contact, location, etc.)
-    void logMessage({ direction: "IN", customerId: msg.chat.id, customerName, connectionId, text: "[其他类型消息]", replyType: "" }, ownerSsId);
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[其他类型消息]", replyType: "" }, ownerSsId);
     const unsupportedReply =
       "抱歉，我暂时无法处理这种类型的消息，请用文字描述您的需求。😊\n" +
       "Sorry, I can't process this message type. Please describe your needs in text. 😊";
@@ -431,7 +431,7 @@ bot.on("business_message", async (ctx) => {
 
   // ── Log the incoming customer message (fire-and-forget) ────────────────────
   void logMessage({
-    direction: "IN",
+    direction: "来消息",
     customerId: msg.chat.id,
     customerName,
     connectionId,
@@ -474,16 +474,16 @@ bot.on("business_message", async (ctx) => {
           business_connection_id: connectionId,
         });
         void logMessage({
-          direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
-          text: `[语音回复] ${kwMatch.reply}`, replyType: "预设语音",
+          direction: "发消息", customerId: msg.chat.id, customerName, connectionId,
+          text: `[语音回复] ${kwMatch.reply}`, replyType: "预设回复",
         }, ownerSsId);
       } else {
         await ctx.api.sendMessage(msg.chat.id, kwMatch.reply, {
           business_connection_id: connectionId,
         });
         void logMessage({
-          direction: "OUT", customerId: msg.chat.id, customerName, connectionId,
-          text: kwMatch.reply, replyType: "预设关键词",
+          direction: "发消息", customerId: msg.chat.id, customerName, connectionId,
+          text: kwMatch.reply, replyType: "预设回复",
         }, ownerSsId);
       }
       return;
@@ -501,12 +501,12 @@ bot.on("business_message", async (ctx) => {
       business_connection_id: connectionId,
     });
     void logMessage({
-      direction: "OUT",
+      direction: "发消息",
       customerId: msg.chat.id,
       customerName,
       connectionId,
       text: aiReply,
-      replyType: "AI\u751f\u6210",
+      replyType: "AI回复",
     }, ownerSsId);
   } catch (err) {
     handleBusinessApiError(err, connectionId);
