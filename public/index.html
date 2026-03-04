@@ -237,6 +237,95 @@
       padding: 2px 8px; font-size: 11px; color: var(--link);
       text-decoration: none;
     }
+
+    /* ── Landing page (browser access) ──────────────────────────────────── */
+    #landing {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 0;
+      background: linear-gradient(160deg, #0f172a 0%, #1e3a5f 60%, #0f172a 100%);
+      color: #fff;
+    }
+    .landing-hero {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 60px 24px 40px;
+      text-align: center;
+    }
+    .landing-logo {
+      width: 80px; height: 80px;
+      background: linear-gradient(135deg, #3b82f6, #06b6d4);
+      border-radius: 22px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 38px;
+      margin-bottom: 24px;
+      box-shadow: 0 8px 32px rgba(59,130,246,0.4);
+    }
+    .landing-hero h1 {
+      font-size: 28px; font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 10px;
+    }
+    .landing-hero p {
+      font-size: 15px; color: rgba(255,255,255,0.7);
+      max-width: 320px; line-height: 1.6;
+      margin-bottom: 32px;
+    }
+    .landing-cta {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: #3b82f6;
+      color: #fff;
+      padding: 14px 28px;
+      border-radius: 14px;
+      font-size: 15px; font-weight: 600;
+      text-decoration: none;
+      box-shadow: 0 4px 16px rgba(59,130,246,0.5);
+      transition: transform .15s, box-shadow .15s;
+    }
+    .landing-cta:active { transform: scale(0.97); }
+    .landing-features {
+      width: 100%;
+      max-width: 480px;
+      padding: 0 16px 80px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .feature-card {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 16px 18px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .feature-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .feature-text h3 {
+      font-size: 14px; font-weight: 600;
+      margin-bottom: 3px;
+    }
+    .feature-text p {
+      font-size: 12px; color: rgba(255,255,255,0.6);
+      line-height: 1.5;
+    }
+    .landing-footer {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      text-align: center;
+      font-size: 11px;
+      color: rgba(255,255,255,0.3);
+      padding: 12px;
+      background: rgba(15,23,42,0.8);
+      backdrop-filter: blur(8px);
+    }
   </style>
 </head>
 <body>
@@ -252,6 +341,49 @@
   <div style="font-size:32px">⚠️</div>
   <div style="font-weight:600">无法加载</div>
   <div id="error-msg"></div>
+</div>
+
+<!-- Landing page (browser access) -->
+<div id="landing">
+  <div class="landing-hero">
+    <div class="landing-logo">🤖</div>
+    <h1>zznet Bot</h1>
+    <p>Telegram Business 智能客服机器人 — 关键词自动回复 + AI 对话，24小时不间断服务您的客户。</p>
+    <a class="landing-cta" href="https://t.me/auto_csbot" target="_blank">✈️ 在 Telegram 中打开</a>
+  </div>
+
+  <div class="landing-features">
+    <div class="feature-card">
+      <div class="feature-icon">🔑</div>
+      <div class="feature-text">
+        <h3>关键词自动回复</h3>
+        <p>设置常见问题的关键词，客户发来消息时即时匹配，秒速回复，无需人工介入。</p>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🧠</div>
+      <div class="feature-text">
+        <h3>AI 智能对话</h3>
+        <p>未命中关键词时，由大语言模型自动处理，支持自定义 AI 角色与回复风格。</p>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🙋</div>
+      <div class="feature-text">
+        <h3>人工接管</h3>
+        <p>随时切换人工模式，AI 自动退让，对话结束后无缝恢复自动回复。</p>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📊</div>
+      <div class="feature-text">
+        <h3>Google Sheets 管理</h3>
+        <p>所有关键词、对话日志均存储在您专属的 Google 电子表格，数据完全掌握在自己手中。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="landing-footer">zznet Bot · Powered by Groq + Telegram Business API</div>
 </div>
 
 <!-- Main app -->
@@ -355,6 +487,13 @@
   function hide(id)   { document.getElementById(id).style.display = "none"; }
   function block(id)  { document.getElementById(id).style.display = "flex"; }
 
+  function showLanding() {
+    hide("loading");
+    hide("app");
+    hide("error-screen");
+    block("landing");
+  }
+
   function setStatus(msg, type) {
     const bar = document.getElementById("status-bar");
     bar.textContent = msg;
@@ -377,8 +516,8 @@
   async function authenticate() {
     const initData = tg?.initData;
     if (!initData) {
-      // Dev fallback: no Telegram context (e.g. browser preview)
-      showError("请在 Telegram 内打开此页面。\nOpen this page inside Telegram.");
+      // Not inside Telegram — show landing page instead of error
+      showLanding();
       return;
     }
 
