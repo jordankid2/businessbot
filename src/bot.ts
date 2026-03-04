@@ -8,10 +8,10 @@ import { transcribeVoice, analyzePhoto, analyzeVideo, assessFileRisk } from "./m
 import { detectGender } from "./gender.js";
 import { registerOwnerReply, isHumanTakeover, clearAutoTakeover, isChatPaused,
          activeTakeoverCount,
-         pauseChat, resumeChat, listPausedChats, listActiveTakeovers } from "./takeover.js";
-import { generateLoginToken } from "./tokens.js";
+  pauseChat, resumeChat, listPausedChats, listActiveTakeovers
+} from "./takeover.js";
 import { getOrProvisionUserSheet, isAdmin } from "./registry.js";
-import { getAdminPrompt, DEFAULT_SYSTEM_PROMPT, invalidatePromptCache } from "./adminPrompt.js";
+import { getAdminPrompt, DEFAULT_SYSTEM_PROMPT } from "./adminPrompt.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -227,16 +227,22 @@ bot.on("business_message", async (ctx) => {
   }
 
   // ── Owner lookup ──────────────────────────────────────────────────────────
-  // getOwnerUserId may return undefined after a bot restart (connection cache
-  // lost). In that case we cannot safely determine if this is an owner message
-  // or a customer message, so we refuse to process it (avoids replying to the
-  // owner's own messages).
-  const ownerUserId = getOwnerUserId(connectionId);
+  // After a bot restart the in-memory connection cache is empty.
+  // We try to restore it via getBotBusinessConnection before giving up.
+  let ownerUserId = getOwnerUserId(connectionId);
   if (ownerUserId === undefined) {
-    console.warn(
-      `[business] ⚠️  Owner unknown for conn=${connectionId} — skipping until business_connection re-fires`
-    );
-    return;
+    try {
+      const fetchedConn = await bot.api.getBusinessConnection(connectionId);
+      upsertConnection(fetchedConn);
+      ownerUserId = fetchedConn.user.id;
+      console.log(`[business] 🔄 Restored connection from API  conn=${connectionId}  owner=${ownerUserId}`);
+    } catch (err) {
+      console.warn(
+        `[business] ⚠️  Could not restore connection conn=${connectionId}:`,
+        (err as Error).message
+      );
+      return;
+    }
   }
 
   // ── Owner self-message check ───────────────────────────────────────────────
@@ -346,10 +352,9 @@ bot.on("business_message", async (ctx) => {
     void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
-      const visionPrompt =
-        "你是专业客服AI。客户发送了这张图片。请分析图片内容，判断它是否与商业咨询有关。" +
-        "如果有关，请给出有帮助的回应；如果看不懂客户意图，请礼貌询问客户想表达什么。" +
-        "请用中英双语回答，语言自然简洁。";
+      const visionPrompt = adminSystemPrompt +
+        "\n\n客户发送了这张图片。请分析图片内容，判断它是否与商业和你的服务范围相关。" +
+        "如果关联请给出回应；如果看不出客户意图，请礼貌询问。请简洁自然。";
       const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
@@ -370,10 +375,9 @@ bot.on("business_message", async (ctx) => {
     void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
-      const visionPrompt =
-        "你是专业客服AI。客户发送了一段视频（以下为视频缩略图）。" +
-        "请判断视频内容是否与商业咨询相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。" +
-        "请用中英双语回答。";
+      const visionPrompt = adminSystemPrompt +
+        "\n\n客户发送了一段视频。" +
+        "请判断视频内容是否与商业和你的服务范围相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。请简洁自然。";
       const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
       const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
       await sleep(BOT_REPLY_DELAY_MS);
@@ -866,3 +870,22 @@ import { startServer } from "./server.js";
 startServer();
 
 void startWithRetry();
+
+/**
+ * Generate a time-limited one-time login token for the keyword manager.
+ * Token encodes user ID and metadata, valid for 10 minutes.
+ */
+function generateLoginToken(userId: number, firstName: string, username: string): string {
+  const payload = {
+    userId,
+    firstName,
+    username,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes
+  };
+
+  // Simple base64-encoded JSON token (for MVP)
+  // In production, use JWT with a signing key
+  return Buffer.from(JSON.stringify(payload)).toString("base64");
+}
+

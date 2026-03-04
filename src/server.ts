@@ -22,6 +22,21 @@ import { invalidatePromptCache } from "./adminPrompt.js";
 const KEYWORDS_SHEET = "Keywords";
 const PROMPTS_SHEET  = "Prompts";
 
+// ─── Session store (24-hour Bearer tokens) ────────────────────────────────────
+
+interface Session { userId: number; ssId: string; expiresAt: number }
+const sessions = new Map<string, Session>();
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function getSession(req: express.Request): Session | null {
+  const auth  = req.headers["authorization"] ?? "";
+  const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session || Date.now() > session.expiresAt) { sessions.delete(token); return null; }
+  return session;
+}
+
 // ─── initData verification ────────────────────────────────────────────────────
 
 function verifyTelegramInitData(
@@ -105,17 +120,17 @@ export function startServer(): void {
     const ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
     const ssUrl = ssId ? `https://docs.google.com/spreadsheets/d/${ssId}` : null;
 
-    res.json({ userId, firstName, username, ssId, ssUrl });
+    const sessionToken = crypto.randomBytes(24).toString("hex");
+    if (ssId) sessions.set(sessionToken, { userId, ssId, expiresAt: Date.now() + SESSION_TTL_MS });
+
+    res.json({ userId, firstName, username, ssId, ssUrl, sessionToken });
   });
 
-  // ── GET /api/keywords?ssId=xxx ──────────────────────────────────────────────
+  // ── GET /api/keywords ────────────────────────────────────────────────────────
   app.get("/api/keywords", async (req, res) => {
-    const ssId = String(req.query["ssId"] ?? "");
-
-    if (!ssId) {
-      res.status(400).json({ error: "Missing ssId query parameter" });
-      return;
-    }
+    const session = getSession(req);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const ssId = session.ssId;
 
     const auth = getGoogleAuth();
     if (!auth) {
@@ -148,13 +163,13 @@ export function startServer(): void {
 
   // ── POST /api/keywords ──────────────────────────────────────────────────────
   app.post("/api/keywords", async (req, res) => {
-    const { ssId, rows } = (req.body ?? {}) as {
-      ssId?: string;
-      rows?: Record<string, string>[];
-    };
+    const session = getSession(req);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const ssId = session.ssId;
+    const { rows } = (req.body ?? {}) as { rows?: Record<string, string>[] };
 
-    if (!ssId || !Array.isArray(rows)) {
-      res.status(400).json({ error: "Missing ssId or rows in request body" });
+    if (!Array.isArray(rows)) {
+      res.status(400).json({ error: "Missing rows in request body" });
       return;
     }
 
@@ -199,10 +214,11 @@ export function startServer(): void {
     }
   });
 
-  // ── GET /api/prompt?ssId=xxx ──────────────────────────────────────────────────────
+  // ── GET /api/prompt ────────────────────────────────────────────────────────────
   app.get("/api/prompt", async (req, res) => {
-    const ssId = String(req.query["ssId"] ?? "");
-    if (!ssId) { res.status(400).json({ error: "Missing ssId" }); return; }
+    const session = getSession(req);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const ssId = session.ssId;
 
     const auth = getGoogleAuth();
     if (!auth) { res.status(503).json({ error: "Google Sheets not configured" }); return; }
@@ -231,10 +247,13 @@ export function startServer(): void {
 
   // ── POST /api/prompt ───────────────────────────────────────────────────────────
   app.post("/api/prompt", async (req, res) => {
-    const { ssId, prompt } = (req.body ?? {}) as { ssId?: string; prompt?: string };
+    const session = getSession(req);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const ssId = session.ssId;
+    const { prompt } = (req.body ?? {}) as { prompt?: string };
 
-    if (!ssId || prompt === undefined) {
-      res.status(400).json({ error: "Missing ssId or prompt in request body" });
+    if (prompt === undefined) {
+      res.status(400).json({ error: "Missing prompt in request body" });
       return;
     }
 

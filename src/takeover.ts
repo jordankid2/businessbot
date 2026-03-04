@@ -80,22 +80,6 @@ export function registerOwnerReply(connectionId: string, chatId: number): void {
 }
 
 /**
- * Explicitly lock a chat in takeover mode (LOCKED mode).
- * Call this via /pause <chatId> command.
- * The chat stays locked until releaseTakeover() is called.
- */
-export function lockTakeover(connectionId: string, chatId: number): void {
-  const key = makeKey(connectionId, chatId);
-  takeoverMap.set(key, {
-    lastOwnerReplyAt: Date.now(),
-    locked: true,
-  });
-  console.log(
-    `[takeover] 🔒 Takeover LOCKED  conn=${connectionId}  chat=${chatId}  (use /resume to unlock)`
-  );
-}
-
-/**
  * Returns true if the bot should defer to the human for this chat.
  *
  * A chat is in takeover when:
@@ -131,19 +115,6 @@ export function clearAutoTakeover(connectionId: string, chatId: number): void {
     console.log(
       `[takeover] ♻️  AUTO takeover cleared  conn=${connectionId}  chat=${chatId}  → bot resumes next message`
     );
-  }
-}
-
-/**
- * Release takeover for a chat (both AUTO and LOCKED modes).
- * Call this via /resume <chatId> command, or to force-resume programmatically.
- */
-export function releaseTakeover(connectionId: string, chatId: number): void {
-  const key = makeKey(connectionId, chatId);
-  const existed = takeoverMap.has(key);
-  takeoverMap.delete(key);
-  if (existed) {
-    console.log(`[takeover] ✅ Takeover released  conn=${connectionId}  chat=${chatId}  → bot resumes`);
   }
 }
 
