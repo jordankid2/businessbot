@@ -350,14 +350,21 @@ bot.on("business_message", async (ctx) => {
   // ── Photo ──────────────────────────────────────────────────────────────────
   if (msg.photo && msg.photo.length > 0) {
     const largest = msg.photo[msg.photo.length - 1];
-    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[图片消息]", replyType: "" }, ownerSsId);
+    const caption = msg.caption?.trim() ?? "";
+    const logText = caption ? `[图片消息] "${caption}"` : "[图片消息]";
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: logText, replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
-      const visionPrompt = adminSystemPrompt +
-        "\n\n客户发送了这张图片。请分析图片内容，判断它是否与商业和你的服务范围相关。" +
-        "如果关联请给出回应；如果看不出客户意图，请礼貌询问。请简洁自然。";
-      const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[图片内容] ${imageDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
+      // Step 1: Vision model neutrally describes the image
+      const descPrompt = "请用中文简洁描述这张图片的内容（2-4句话），客观列出可见的文字、物品、场景、人物等信息，不要给建议或回复。";
+      const imageDesc = await analyzePhoto(largest.file_id, BOT_TOKEN, descPrompt);
+      console.log(`[media] 🖼 chat=${msg.chat.id}: "${imageDesc.slice(0, 80)}"`);
+      // Step 2: Build user context and pass to chat() — preserves conversation history
+      const userContext = caption
+        ? `[客户发来图片并说: "${caption}"] [图片内容: ${imageDesc}]`
+        : `[客户发来图片] [图片内容: ${imageDesc}]`;
+      const gender = await detectGender(msg.chat);
+      const aiReply = await chat(key, userContext, withGenderCtx(adminSystemPrompt, gender));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
@@ -373,14 +380,20 @@ bot.on("business_message", async (ctx) => {
   if (msg.video || msg.video_note) {
     const thumbFileId =
       msg.video?.thumbnail?.file_id ?? msg.video_note?.thumbnail?.file_id;
-    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: "[视频消息]", replyType: "" }, ownerSsId);
+    const caption = msg.caption?.trim() ?? "";
+    const logText = caption ? `[视频消息] "${caption}"` : "[视频消息]";
+    void logMessage({ direction: "来消息", customerId: msg.chat.id, customerName, connectionId, text: logText, replyType: "" }, ownerSsId);
     try {
       await ctx.api.sendChatAction(msg.chat.id, "typing", { business_connection_id: connectionId });
-      const visionPrompt = adminSystemPrompt +
-        "\n\n客户发送了一段视频。" +
-        "请判断视频内容是否与商业和你的服务范围相关。如果相关请给出回应；如果无法判断客户意图请礼貌询问。请简洁自然。";
-      const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, visionPrompt);
-      const aiReply = await chat(key, `[视频内容] ${videoDesc}`, withGenderCtx(adminSystemPrompt, await detectGender(msg.chat)));
+      // Step 1: Vision model describes the video thumbnail neutrally
+      const descPrompt = "请用中文简洁描述这张视频截图/缩略图的内容（1-3句话），客观描述画面内容，不要给建议或回复。";
+      const videoDesc = await analyzeVideo(thumbFileId, BOT_TOKEN, descPrompt);
+      // Step 2: Build user context and pass to chat() — preserves conversation history
+      const userContext = caption
+        ? `[客户发来视频并说: "${caption}"] [视频缩略图内容: ${videoDesc}]`
+        : `[客户发来视频] [视频缩略图内容: ${videoDesc}]`;
+      const gender = await detectGender(msg.chat);
+      const aiReply = await chat(key, userContext, withGenderCtx(adminSystemPrompt, gender));
       await sleep(BOT_REPLY_DELAY_MS);
       if (isHumanTakeover(connectionId, msg.chat.id)) { clearAutoTakeover(connectionId, msg.chat.id); return; }
       await ctx.api.sendMessage(msg.chat.id, aiReply, { business_connection_id: connectionId });
