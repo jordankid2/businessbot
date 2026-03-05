@@ -120,7 +120,7 @@ export function startServer(): void {
     const ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
 
     if (!ssId) {
-      res.status(403).json({ error: `userId ${userId} 不在管理员白名单中，请联系平台运营者` });
+      res.status(503).json({ error: "Google Sheets 未配置，请联系平台运营者" });
       return;
     }
 

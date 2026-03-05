@@ -230,14 +230,11 @@ async function provisionSpreadsheet(
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Look up (or create) the per-user spreadsheet for a business owner.
- * Returns null if Google Sheets is not configured.
- */
-/**
- * Look up (or create) the per-admin spreadsheet.
- * Returns null if:
- *   - Google Sheets is not configured, OR
- *   - the userId is NOT listed in the "Admins" whitelist sheet.
+ * Look up (or create) the per-user spreadsheet.
+ * Any authenticated Telegram user is auto-registered — no whitelist required.
+ * - Found in Customers sheet → return existing ssId
+ * - Not found → provision a new spreadsheet, register in Customers, return ssId
+ * Returns null only if Google Sheets is not configured.
  */
 export async function getOrProvisionUserSheet(
   userId: number,
@@ -247,16 +244,12 @@ export async function getOrProvisionUserSheet(
   const hit = _cache.get(userId);
   if (hit && Date.now() < hit.expiresAt) return hit.ssId;
 
-  // ── Whitelist check ────────────────────────────────────────────────────────
-  const allowed = await isAdmin(userId);
-  if (!allowed) {
-    console.warn(`[registry] ⛔  userId=${userId} is not in the Admins whitelist — ignoring.`);
-    return null;
-  }
+  if (!isGoogleConfigured() || !MASTER_SS_ID) return null;
 
   let ssId = await lookupRegistry(userId);
 
   if (!ssId) {
+    console.log(`[registry] 🆕 New user userId=${userId} (@${username || "?"}) — provisioning spreadsheet...`);
     try {
       ssId = await provisionSpreadsheet(userId, username, firstName);
     } catch (err) {
