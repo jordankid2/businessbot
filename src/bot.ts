@@ -694,41 +694,24 @@ bot.command("help", async (ctx) => {
 
 bot.command("login", async (ctx) => {
   if (!(await requireAdmin(ctx))) return;
-  const gasUrl = process.env.GAS_WEB_APP_URL?.trim();
-  if (!gasUrl) {
+  const miniAppUrl = process.env.MINI_APP_URL?.trim();
+  if (!miniAppUrl) {
     await ctx.reply(
-      "⚠️ 关键词管理页面尚未配置，请联系管理员。\n" +
-      "Keyword manager is not configured yet."
+      "⚠️ 管理面板尚未配置，请联系管理员设置 MINI_APP_URL。\n" +
+      "Admin panel is not configured. Please set MINI_APP_URL."
     );
     return;
   }
-
-  const user = ctx.from;
-  if (!user) return;
-
-  try {
-    const token = await generateLoginToken(
-      user.id,
-      user.first_name ?? "",
-      user.username  ?? ""
-    );
-    const link = `${gasUrl}?token=${token}`;
-    await ctx.reply(
-      "🔗 *关键词管理登录链接*\n\n" +
-      "点击下方链接直接登录关键词管理页面\n" +
-      "（链接 *10 分钟内有效*，仅限使用一次）：\n\n" +
-      link + "\n\n" +
-      "⚠️ 请勿将此链接分享给他人。\n" +
-      "_One\-time link, valid for 10 min\. Do not share\._",
-      { parse_mode: "MarkdownV2" }
-    );
-  } catch (err) {
-    console.error("[login] Failed to generate token:", err);
-    await ctx.reply(
-      "⚠️ 无法生成登录链接，请稍后再试。\n" +
-      "Could not generate login link. Please try again."
-    );
-  }
+  await ctx.reply(
+    "🛠 点击下方按钮打开关键词管理面板\nClick the button below to open the admin panel:",
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🛠 打开管理面板", web_app: { url: miniAppUrl } },
+        ]],
+      },
+    }
+  );
 });
 
 bot.on("message:text", async (ctx) => {
@@ -888,21 +871,4 @@ void initDb().then(() => {
   process.exit(1);
 });
 
-/**
- * Generate a time-limited one-time login token for the keyword manager.
- * Token encodes user ID and metadata, valid for 10 minutes.
- */
-function generateLoginToken(userId: number, firstName: string, username: string): string {
-  const payload = {
-    userId,
-    firstName,
-    username,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes
-  };
-
-  // Simple base64-encoded JSON token (for MVP)
-  // In production, use JWT with a signing key
-  return Buffer.from(JSON.stringify(payload)).toString("base64");
-}
 
