@@ -10,9 +10,10 @@
 
 import { Pool } from "pg";
 
+const dbUrl = process.env.DATABASE_URL ?? "";
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("railway")
+  connectionString: dbUrl,
+  ssl: dbUrl.includes("sslmode=require") || dbUrl.includes("railway") || dbUrl.includes("neon.tech")
     ? { rejectUnauthorized: false }
     : false,
 });
