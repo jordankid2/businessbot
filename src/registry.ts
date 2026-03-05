@@ -94,6 +94,7 @@ export function invalidateAdminCache(userId: number): void {
 }
 
 /** Find the user's spreadsheetId in the master Customers sheet. Returns null if absent. */
+/** Find the user's spreadsheetId in the master Customers sheet. Returns null if absent. */
 async function lookupRegistry(userId: number): Promise<string | null> {
   if (!isGoogleConfigured() || !MASTER_SS_ID) return null;
   try {
@@ -111,6 +112,31 @@ async function lookupRegistry(userId: number): Promise<string | null> {
     console.warn("[registry] lookup error:", (err as Error).message);
   }
   return null;
+}
+
+/** Update the ssId + ssUrl for an existing user row in Customers sheet. */
+async function updateCustomersRow(userId: number, newSsId: string): Promise<void> {
+  const res = await sheetsApi().spreadsheets.values.get({
+    spreadsheetId: MASTER_SS_ID,
+    range: `${CUSTOMERS_SHEET}!A:A`,
+  });
+  const rows = res.data.values ?? [];
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i]?.[0] ?? "").trim() === String(userId)) {
+      const rowNum = i + 1; // 1-indexed, +1 for header
+      const ssUrl = `https://docs.google.com/spreadsheets/d/${newSsId}`;
+      await sheetsApi().spreadsheets.values.update({
+        spreadsheetId: MASTER_SS_ID,
+        range: `${CUSTOMERS_SHEET}!E${rowNum}:F${rowNum}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [[newSsId, ssUrl]] },
+      });
+      console.log(`[registry] ✏️  Updated Customers row ${rowNum} for userId=${userId}`);
+      return;
+    }
+  }
+  // Row not found — just append instead
+  console.warn(`[registry] ⚠️  userId=${userId} not found in Customers, will append on next provision`);
 }
 
 /** Create a brand-new spreadsheet for the user and register it in the master sheet. */
@@ -278,4 +304,28 @@ export async function findUserSpreadsheetId(userId: number): Promise<string | nu
 /** Force-expire the cache entry for a user (call after keyword save). */
 export function invalidateUserCache(userId: number): void {
   _cache.delete(userId);
+}
+
+/**
+ * Force re-provision a new spreadsheet for the user (e.g. old one was deleted).
+ * Overwrites the Customers row with the new ssId.
+ */
+export async function reprovisionUserSheet(
+  userId: number,
+  username = "",
+  firstName = ""
+): Promise<string | null> {
+  _cache.delete(userId);
+  console.log(`[registry] 🔄 Re-provisioning spreadsheet for userId=${userId}...`);
+  try {
+    // Update the Customers row with the new ssId
+    const newSsId = await provisionSpreadsheet(userId, username, firstName);
+    // Overwrite old entry in Customers sheet
+    await updateCustomersRow(userId, newSsId);
+    _cache.set(userId, { ssId: newSsId, expiresAt: Date.now() + CACHE_TTL_MS });
+    return newSsId;
+  } catch (err) {
+    console.error("[registry] ❌ reprovisionUserSheet failed:", (err as Error).message);
+    return null;
+  }
 }

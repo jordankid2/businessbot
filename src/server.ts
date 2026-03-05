@@ -15,7 +15,7 @@ import path from "path";
 import crypto from "crypto";
 import { google } from "googleapis";
 import { getGoogleAuth } from "./gauth.js";
-import { getOrProvisionUserSheet } from "./registry.js";
+import { getOrProvisionUserSheet, reprovisionUserSheet } from "./registry.js";
 import { invalidateCache } from "./sheets.js";
 import { invalidatePromptCache } from "./adminPrompt.js";
 
@@ -117,11 +117,24 @@ export function startServer(): void {
       return;
     }
 
-    const ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
+    let ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
 
     if (!ssId) {
       res.status(503).json({ error: "Google Sheets 未配置，请联系平台运营者" });
       return;
+    }
+
+    // Verify the spreadsheet is actually accessible; re-provision if not
+    try {
+      const auth = getGoogleAuth()!;
+      await google.sheets({ version: "v4", auth }).spreadsheets.get({ spreadsheetId: ssId });
+    } catch (verifyErr) {
+      console.warn(`[server] ⚠️ Spreadsheet ${ssId} for userId=${userId} is inaccessible (${(verifyErr as Error).message}) — re-provisioning...`);
+      ssId = await reprovisionUserSheet(userId, username, firstName).catch(() => null);
+      if (!ssId) {
+        res.status(503).json({ error: "无法访问或创建电子表格，请检查 Google Sheets 权限" });
+        return;
+      }
     }
 
     const ssUrl = `https://docs.google.com/spreadsheets/d/${ssId}`;
@@ -129,6 +142,29 @@ export function startServer(): void {
     sessions.set(sessionToken, { userId, ssId, expiresAt: Date.now() + SESSION_TTL_MS });
 
     res.json({ userId, firstName, username, ssId, ssUrl, sessionToken });
+  });
+
+  // ── GET /api/debug ── (diagnostics)
+  app.get("/api/debug", async (req, res) => {
+    const auth = getGoogleAuth();
+    const masterSsId = process.env.GOOGLE_SPREADSHEET_ID ?? "";
+    let masterOk = false;
+    let masterErr = "";
+    if (auth && masterSsId) {
+      try {
+        await google.sheets({ version: "v4", auth }).spreadsheets.get({ spreadsheetId: masterSsId });
+        masterOk = true;
+      } catch (e) {
+        masterErr = (e as Error).message;
+      }
+    }
+    res.json({
+      googleConfigured: !!auth,
+      masterSsId,
+      masterAccessible: masterOk,
+      masterError: masterErr || undefined,
+      activeSessions: sessions.size,
+    });
   });
 
   // ── GET /api/keywords ────────────────────────────────────────────────────────
