@@ -337,7 +337,7 @@
 </div>
 
 <!-- Error screen -->
-<div id="error-screen" style="display:none">
+<div id="error-screen" style="display:none;">
   <div style="font-size:32px">⚠️</div>
   <div style="font-weight:600">无法加载</div>
   <div id="error-msg"></div>
@@ -375,10 +375,10 @@
       </div>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">📊</div>
+      <div class="feature-icon">�️</div>
       <div class="feature-text">
-        <h3>Google Sheets 管理</h3>
-        <p>所有关键词、对话日志均存储在您专属的 Google 电子表格，数据完全掌握在自己手中。</p>
+        <h3>数据云端管理</h3>
+        <p>关键词、AI 提示词和对话日志均存储在云端数据库，Mini App 随时查看与编辑。</p>
       </div>
     </div>
   </div>
@@ -491,7 +491,7 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  function show(id)   { document.getElementById(id).style.display = ""; }
+  function show(id)   { document.getElementById(id).style.display = "block"; }
   function hide(id)   { document.getElementById(id).style.display = "none"; }
   function block(id)  { document.getElementById(id).style.display = "flex"; }
 
