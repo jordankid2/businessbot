@@ -392,9 +392,6 @@
     <h1>zznet Bot 管理</h1>
     <div class="header-sub">
       <span id="user-label"></span>
-      <a id="ss-link" class="ss-chip" href="#" target="_blank" style="display:none">
-        📊 打开电子表格
-      </a>
     </div>
   </div>
 
@@ -402,6 +399,7 @@
   <div class="tab-bar">
     <button id="tab-kw-btn" class="active" onclick="switchTab('kw')">🔑 关键词</button>
     <button id="tab-prompt-btn" onclick="switchTab('prompt')">🤖 AI Prompt</button>
+    <button id="tab-logs-btn" onclick="switchTab('logs')">📋 日志</button>
   </div>
 
   <!-- ── Keywords tab ── -->
@@ -454,6 +452,16 @@
       <button class="btn btn-primary" onclick="savePrompt()">💾 保存 Prompt</button>
     </div>
   </div>
+
+  <!-- ── Logs tab ── -->
+  <div id="tab-logs" class="tab-panel">
+    <div class="toolbar">
+      <div class="spacer"></div>
+      <button class="btn btn-outline btn-sm" onclick="loadLogs()">↺ 刷新</button>
+    </div>
+    <div id="logs-status-bar" style="font-size:12px;padding:4px 16px;color:var(--hint);min-height:22px;"></div>
+    <div id="logs-list" style="padding:0 0 80px;"></div>
+  </div>
 </div>
 
 <script>
@@ -474,11 +482,12 @@
   // ── Tab switching ──────────────────────────────────────────────────────────
 
   window.switchTab = function (tab) {
-    const tabs = ["kw", "prompt"];
+    const tabs = ["kw", "prompt", "logs"];
     tabs.forEach(t => {
       document.getElementById(`tab-${t}`).classList.toggle("active", t === tab);
       document.getElementById(`tab-${t}-btn`).classList.toggle("active", t === tab);
     });
+    if (tab === "logs") loadLogs();
   };
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -541,11 +550,7 @@
       document.getElementById("user-label").textContent =
         `👤 ${data.firstName || "用户"}`;
 
-      if (data.ssUrl) {
-        const link = document.getElementById("ss-link");
-        link.href = data.ssUrl;
-        link.style.display = "inline-flex";
-      }
+      // ss-link removed (no longer a Google Sheet)
 
       hide("loading");
       show("app");
@@ -732,6 +737,48 @@
 
   window.loadPrompt  = loadPrompt;
   window.savePrompt  = savePrompt;
+
+  // ── Logs ───────────────────────────────────────────────────────────────────
+
+  function setLogsStatus(msg, type) {
+    const bar = document.getElementById("logs-status-bar");
+    bar.textContent = msg;
+    bar.style.color = type === "ok" ? "#22a06b" : type === "error" ? "#e53e3e" : "var(--hint)";
+  }
+
+  async function loadLogs() {
+    if (!_sessionToken) { setLogsStatus("未登录", "error"); return; }
+    setLogsStatus("加载中…");
+    try {
+      const res  = await fetch("/api/logs?limit=100", { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) { setLogsStatus(data.error ?? "加载失败", "error"); return; }
+      const logs = data.logs ?? [];
+      const list = document.getElementById("logs-list");
+      if (!logs.length) {
+        list.innerHTML = '<div style="text-align:center;padding:32px;color:var(--hint);">暂无日志</div>';
+        setLogsStatus("暂无记录", "ok");
+        return;
+      }
+      list.innerHTML = logs.map(l => {
+        const time = new Date(l.created_at).toLocaleString("zh-CN", { hour12: false });
+        const dir  = l.direction === "来消息" ? "⬇️" : "⬆️";
+        const tag  = l.reply_type ? `<span style="font-size:10px;background:var(--section-bg);border-radius:4px;padding:1px 5px;">${esc(l.reply_type)}</span>` : "";
+        return `<div style="border-bottom:1px solid var(--border);padding:10px 16px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+            <span>${dir} <b>${esc(l.customer_name || String(l.customer_id))}</b> ${tag}</span>
+            <span style="font-size:11px;color:var(--hint);">${time}</span>
+          </div>
+          <div style="font-size:13px;color:var(--text);white-space:pre-wrap;">${esc(l.message)}</div>
+        </div>`;
+      }).join("");
+      setLogsStatus(`已加载 ${logs.length} 条记录`, "ok");
+    } catch (err) {
+      setLogsStatus("网络错误：" + (err?.message ?? ""), "error");
+    }
+  }
+
+  window.loadLogs = loadLogs;
 
   // ── Boot ───────────────────────────────────────────────────────────────────
   authenticate();

@@ -1,30 +1,27 @@
 /**
- * Mini App Web Server
+ * Mini App Web Server -- PostgreSQL-backed
  *
- * Serves the Telegram Mini App UI and provides API endpoints for:
- *  - POST /api/auth        — verify Telegram initData, return user + spreadsheet info
- *  - GET  /api/keywords    — fetch keyword rows from admin's spreadsheet
- *  - POST /api/keywords    — overwrite keyword rows in admin's spreadsheet
- *  - GET  /api/prompt      — fetch admin's custom system prompt
- *  - POST /api/prompt      — save admin's custom system prompt
+ *  POST /api/auth        -- verify Telegram initData, provision user, return session token
+ *  GET  /api/keywords    -- fetch keyword rows for the authenticated user
+ *  POST /api/keywords    -- overwrite keyword rows for the authenticated user
+ *  GET  /api/prompt      -- fetch user's custom system prompt
+ *  POST /api/prompt      -- save user's custom system prompt
+ *  GET  /api/logs        -- fetch recent chat logs (newest first)
+ *  GET  /api/debug       -- diagnostics
  */
 
 import express from "express";
 import cors from "cors";
 import path from "path";
 import crypto from "crypto";
-import { google } from "googleapis";
-import { getGoogleAuth } from "./gauth.js";
-import { getOrProvisionUserSheet, reprovisionUserSheet } from "./registry.js";
+import pool from "./db.js";
+import { getOrProvisionUserSheet } from "./registry.js";
 import { invalidateCache } from "./sheets.js";
 import { invalidatePromptCache } from "./adminPrompt.js";
 
-const KEYWORDS_SHEET = "Keywords";
-const PROMPTS_SHEET  = "Prompts";
+// -- Session store (24-hour Bearer tokens) ------------------------------------
 
-// ─── Session store (24-hour Bearer tokens) ────────────────────────────────────
-
-interface Session { userId: number; ssId: string; expiresAt: number }
+interface Session { userId: number; expiresAt: number }
 const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -37,41 +34,28 @@ function getSession(req: express.Request): Session | null {
   return session;
 }
 
-// ─── initData verification ────────────────────────────────────────────────────
+// -- initData verification ----------------------------------------------------
 
 function verifyTelegramInitData(
-  initData: string,
-  botToken: string
+  initData: string, botToken: string
 ): Record<string, string> | null {
   const params = new URLSearchParams(initData);
   const hash = params.get("hash");
   if (!hash) return null;
-
   params.delete("hash");
-
   const checkString = Array.from(params.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${v}`)
     .join("\n");
-
-  const secretKey = crypto
-    .createHmac("sha256", "WebAppData")
-    .update(botToken)
-    .digest();
-
-  const expected = crypto
-    .createHmac("sha256", secretKey)
-    .update(checkString)
-    .digest("hex");
-
+  const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
+  const expected  = crypto.createHmac("sha256", secretKey).update(checkString).digest("hex");
   if (expected !== hash) return null;
-
   const parsed: Record<string, string> = {};
   for (const [k, v] of params.entries()) parsed[k] = v;
   return parsed;
 }
 
-// ─── Server factory ───────────────────────────────────────────────────────────
+// -- Server -------------------------------------------------------------------
 
 export function startServer(): void {
   const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -80,241 +64,120 @@ export function startServer(): void {
   const app = express();
   app.use(cors());
   app.use(express.json());
-
-  // Serve Mini App static files from ../public/
   app.use(express.static(path.resolve(__dirname, "../public")));
 
-  // ── POST /api/auth ──────────────────────────────────────────────────────────
+  // POST /api/auth
   app.post("/api/auth", async (req, res) => {
     const { initData } = (req.body ?? {}) as { initData?: string };
-
-    if (!initData) {
-      res.status(400).json({ error: "Missing initData" });
-      return;
-    }
+    if (!initData) { res.status(400).json({ error: "Missing initData" }); return; }
 
     const parsed = verifyTelegramInitData(initData, BOT_TOKEN);
-    if (!parsed) {
-      res.status(401).json({ error: "Invalid initData — HMAC mismatch" });
-      return;
-    }
+    if (!parsed) { res.status(401).json({ error: "Invalid initData" }); return; }
 
     let userId: number | null = null;
-    let firstName = "";
-    let username  = "";
+    let firstName = "", username = "";
     try {
-      const user  = JSON.parse(parsed.user ?? "{}") as Record<string, unknown>;
-      userId    = user.id    as number ?? null;
+      const user = JSON.parse(parsed.user ?? "{}") as Record<string, unknown>;
+      userId    = user.id as number ?? null;
       firstName = (user.first_name as string) ?? "";
       username  = (user.username  as string) ?? "";
-    } catch {
-      res.status(400).json({ error: "Malformed user field in initData" });
+    } catch { res.status(400).json({ error: "Malformed user field" }); return; }
+
+    if (!userId) { res.status(400).json({ error: "Missing user id" }); return; }
+
+    const ownerKey = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
+    if (!ownerKey) {
+      res.status(503).json({ error: "Database not configured" });
       return;
     }
 
-    if (!userId) {
-      res.status(400).json({ error: "Missing user id" });
-      return;
-    }
-
-    let ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
-
-    if (!ssId) {
-      res.status(503).json({ error: "Google Sheets 未配置，请联系平台运营者" });
-      return;
-    }
-
-    // Verify the spreadsheet is actually accessible; re-provision if not
-    try {
-      const auth = getGoogleAuth()!;
-      await google.sheets({ version: "v4", auth }).spreadsheets.get({ spreadsheetId: ssId });
-    } catch (verifyErr) {
-      console.warn(`[server] ⚠️ Spreadsheet ${ssId} for userId=${userId} is inaccessible (${(verifyErr as Error).message}) — re-provisioning...`);
-      ssId = await reprovisionUserSheet(userId, username, firstName).catch(() => null);
-      if (!ssId) {
-        res.status(503).json({ error: "无法访问或创建电子表格，请检查 Google Sheets 权限" });
-        return;
-      }
-    }
-
-    const ssUrl = `https://docs.google.com/spreadsheets/d/${ssId}`;
     const sessionToken = crypto.randomBytes(24).toString("hex");
-    sessions.set(sessionToken, { userId, ssId, expiresAt: Date.now() + SESSION_TTL_MS });
+    sessions.set(sessionToken, { userId, expiresAt: Date.now() + SESSION_TTL_MS });
 
-    res.json({ userId, firstName, username, ssId, ssUrl, sessionToken });
+    res.json({ userId, firstName, username, sessionToken });
   });
 
-  // ── GET /api/debug ── (diagnostics)
-  app.get("/api/debug", async (req, res) => {
-    const auth = getGoogleAuth();
-    const masterSsId = process.env.GOOGLE_SPREADSHEET_ID ?? "";
-    let masterOk = false;
-    let masterErr = "";
-    if (auth && masterSsId) {
-      try {
-        await google.sheets({ version: "v4", auth }).spreadsheets.get({ spreadsheetId: masterSsId });
-        masterOk = true;
-      } catch (e) {
-        masterErr = (e as Error).message;
-      }
-    }
-    res.json({
-      googleConfigured: !!auth,
-      masterSsId,
-      masterAccessible: masterOk,
-      masterError: masterErr || undefined,
-      activeSessions: sessions.size,
-    });
-  });
-
-  // ── GET /api/keywords ────────────────────────────────────────────────────────
+  // GET /api/keywords
   app.get("/api/keywords", async (req, res) => {
     const session = getSession(req);
     if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
-    const ssId = session.ssId;
-
-    const auth = getGoogleAuth();
-    if (!auth) {
-      res.status(503).json({ error: "Google Sheets is not configured" });
-      return;
-    }
-
     try {
-      const sheets = google.sheets({ version: "v4", auth });
-      const result = await sheets.spreadsheets.values.get({
-        spreadsheetId: ssId,
-        range: `${KEYWORDS_SHEET}!A2:D`,
-      });
-
-      const rows = (result.data.values ?? []).map(
-        ([kw, reply, audio, notes]: (string | undefined)[]) => ({
-          keyword:  kw    ?? "",
-          reply:    reply ?? "",
-          audioUrl: audio ?? "",
-          notes:    notes ?? "",
-        })
+      const result = await pool.query(
+        "SELECT id, keyword, reply, audio_url, notes FROM keywords WHERE user_id = $1 ORDER BY id",
+        [session.userId]
       );
-
+      const rows = result.rows.map(r => ({
+        id:       r.id as number,
+        keyword:  r.keyword  as string,
+        reply:    r.reply    as string,
+        audioUrl: r.audio_url as string,
+        notes:    r.notes    as string,
+      }));
       res.json({ rows });
     } catch (err) {
       console.error("[server] GET /api/keywords error:", err);
-      res.status(500).json({ error: "Failed to fetch keywords from Sheets", detail: (err as Error).message });
+      res.status(500).json({ error: "Failed to fetch keywords", detail: (err as Error).message });
     }
   });
 
-  // ── POST /api/keywords ──────────────────────────────────────────────────────
+  // POST /api/keywords  (full replace)
   app.post("/api/keywords", async (req, res) => {
     const session = getSession(req);
     if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
-    const ssId = session.ssId;
     const { rows } = (req.body ?? {}) as { rows?: Record<string, string>[] };
-
-    if (!Array.isArray(rows)) {
-      res.status(400).json({ error: "Missing rows in request body" });
-      return;
-    }
-
-    const auth = getGoogleAuth();
-    if (!auth) {
-      res.status(503).json({ error: "Google Sheets is not configured" });
-      return;
-    }
+    if (!Array.isArray(rows)) { res.status(400).json({ error: "Missing rows" }); return; }
 
     try {
-      const sheets = google.sheets({ version: "v4", auth });
-
-      // Clear existing data rows (row 1 = header, keep it)
-      await sheets.spreadsheets.values.clear({
-        spreadsheetId: ssId,
-        range: `${KEYWORDS_SHEET}!A2:D`,
-      });
-
-      if (rows.length > 0) {
-        const values = rows.map((r) => [
-          r["keyword"]  ?? "",
-          r["reply"]    ?? "",
-          r["audioUrl"] ?? "",
-          r["notes"]    ?? "",
-        ]);
-
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: ssId,
-          range: `${KEYWORDS_SHEET}!A2`,
-          valueInputOption: "RAW",
-          requestBody: { values },
-        });
+      await pool.query("BEGIN");
+      await pool.query("DELETE FROM keywords WHERE user_id = $1", [session.userId]);
+      for (const r of rows) {
+        if (!(r["keyword"] ?? "").trim() && !(r["reply"] ?? "").trim()) continue;
+        await pool.query(
+          "INSERT INTO keywords(user_id, keyword, reply, audio_url, notes) VALUES($1,$2,$3,$4,$5)",
+          [session.userId, r["keyword"] ?? "", r["reply"] ?? "",
+           r["audioUrl"] ?? "", r["notes"] ?? ""]
+        );
       }
-
-      // Invalidate in-memory cache so next message picks up new keywords
-      invalidateCache(ssId);
-
+      await pool.query("COMMIT");
+      invalidateCache(String(session.userId));
       res.json({ ok: true, saved: rows.length });
     } catch (err) {
+      await pool.query("ROLLBACK").catch(() => {});
       console.error("[server] POST /api/keywords error:", err);
-      res.status(500).json({ error: "Failed to save keywords to Sheets", detail: (err as Error).message });
+      res.status(500).json({ error: "Failed to save keywords", detail: (err as Error).message });
     }
   });
 
-  // ── GET /api/prompt ────────────────────────────────────────────────────────────
+  // GET /api/prompt
   app.get("/api/prompt", async (req, res) => {
     const session = getSession(req);
     if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
-    const ssId = session.ssId;
-
-    const auth = getGoogleAuth();
-    if (!auth) { res.status(503).json({ error: "Google Sheets not configured" }); return; }
-
     try {
-      const sheets = google.sheets({ version: "v4", auth });
-      const result = await sheets.spreadsheets.values.get({
-        spreadsheetId: ssId,
-        range: `${PROMPTS_SHEET}!A2:B`,
-      });
-
-      let prompt = "";
-      for (const row of (result.data.values ?? [])) {
-        if (String(row[0] ?? "").trim().toLowerCase() === "system_prompt") {
-          prompt = String(row[1] ?? "").trim();
-          break;
-        }
-      }
-
-      res.json({ prompt });
+      const result = await pool.query(
+        "SELECT system_prompt FROM prompts WHERE user_id = $1", [session.userId]
+      );
+      res.json({ prompt: (result.rows[0]?.system_prompt as string) ?? "" });
     } catch (err) {
       console.error("[server] GET /api/prompt error:", err);
       res.status(500).json({ error: "Failed to fetch prompt", detail: (err as Error).message });
     }
   });
 
-  // ── POST /api/prompt ───────────────────────────────────────────────────────────
+  // POST /api/prompt
   app.post("/api/prompt", async (req, res) => {
     const session = getSession(req);
     if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
-    const ssId = session.ssId;
     const { prompt } = (req.body ?? {}) as { prompt?: string };
-
-    if (prompt === undefined) {
-      res.status(400).json({ error: "Missing prompt in request body" });
-      return;
-    }
-
-    const auth = getGoogleAuth();
-    if (!auth) { res.status(503).json({ error: "Google Sheets not configured" }); return; }
-
+    if (prompt === undefined) { res.status(400).json({ error: "Missing prompt" }); return; }
     try {
-      const sheets = google.sheets({ version: "v4", auth });
-
-      // Upsert the system_prompt row (always row 2)
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: ssId,
-        range: `${PROMPTS_SHEET}!A2:B2`,
-        valueInputOption: "RAW",
-        requestBody: { values: [["system_prompt", prompt]] },
-      });
-
-      // Invalidate cached prompt so next AI call uses the new value
-      invalidatePromptCache(ssId);
-
+      await pool.query(
+        `INSERT INTO prompts(user_id, system_prompt, updated_at)
+         VALUES($1, $2, NOW())
+         ON CONFLICT(user_id) DO UPDATE
+           SET system_prompt = EXCLUDED.system_prompt, updated_at = NOW()`,
+        [session.userId, prompt]
+      );
+      invalidatePromptCache(String(session.userId));
       res.json({ ok: true });
     } catch (err) {
       console.error("[server] POST /api/prompt error:", err);
@@ -322,7 +185,42 @@ export function startServer(): void {
     }
   });
 
+  // GET /api/logs?limit=50&offset=0
+  app.get("/api/logs", async (req, res) => {
+    const session = getSession(req);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const limit  = Math.min(parseInt(String(req.query["limit"]  ?? "50"),  10), 200);
+    const offset = Math.max(parseInt(String(req.query["offset"] ?? "0"),   10), 0);
+    try {
+      const result = await pool.query(
+        `SELECT direction, customer_id, customer_name, connection_id,
+                message, reply_type, created_at
+         FROM logs WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [session.userId, limit, offset]
+      );
+      res.json({ logs: result.rows });
+    } catch (err) {
+      console.error("[server] GET /api/logs error:", err);
+      res.status(500).json({ error: "Failed to fetch logs", detail: (err as Error).message });
+    }
+  });
+
+  // GET /api/debug
+  app.get("/api/debug", async (_req, res) => {
+    let dbOk = false, dbErr = "";
+    try { await pool.query("SELECT 1"); dbOk = true; }
+    catch (e) { dbErr = (e as Error).message; }
+    res.json({
+      dbConfigured: Boolean(process.env.DATABASE_URL),
+      dbAccessible: dbOk,
+      dbError:      dbErr || undefined,
+      activeSessions: sessions.size,
+    });
+  });
+
   app.listen(PORT, () => {
-    console.log(`[server] 🌐  Mini App server listening on port ${PORT}`);
+    console.log(`[server] Mini App server listening on port ${PORT}`);
   });
 }

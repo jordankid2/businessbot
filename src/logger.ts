@@ -1,40 +1,10 @@
 /**
- * Chat Logger — Google Sheets
- *
- * Appends every business chat message (来消息 and 发消息) to a "Logs" sheet.
- * The sheet is created automatically with headers if it doesn't exist yet.
- *
- * ─── Logs sheet columns ───────────────────────────────────────────────────────
- *  A  时间          Full timestamp  e.g. 2026-03-03 14:25:36  (GMT+8)
- *  B  方向          来消息 = customer → us
- *                   发消息 = us → customer
- *  C  客户ID        Telegram chat.id of the customer
- *  D  客户名        first_name + last_name / username (best effort)
- *  E  连接ID        business_connection_id (shortened to 8 chars for readability)
- *  F  消息内容      The actual message text
- *  G  回复类型      (发消息 only) 预设回复 | AI回复 | 人工回复
- * ─────────────────────────────────────────────────────────────────────────────
- *
- * Logging is FIRE-AND-FORGET — errors are caught and printed but never thrown,
- * so a Sheets issue never blocks or delays the bot's reply to the customer.
+ * Message logger -- PostgreSQL-backed
  */
+import pool from "./db.js";
 
-import { google, sheets_v4 } from "googleapis";
-import { getGoogleAuth, isGoogleConfigured } from "./gauth.js";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const LOGS_SHEET_NAME = "Logs";
-const TIMEZONE = "Asia/Kuala_Lumpur"; // GMT+8
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type Direction = "来消息" | "发消息";
-export type ReplyType =
-  | "预设回复"
-  | "AI回复"
-  | "人工回复"
-  | "";
+export type Direction = "\u6765\u6d88\u606f" | "\u53d1\u6d88\u606f";
+export type ReplyType = "\u9884\u8bbe\u56de\u590d" | "AI\u56de\u590d" | "\u4eba\u5de5\u56de\u590d" | "";
 
 export interface LogEntry {
   direction: Direction;
@@ -42,208 +12,31 @@ export interface LogEntry {
   customerName: string;
   connectionId: string;
   text: string;
-  replyType?: ReplyType; // only meaningful for 发消息
+  replyType: ReplyType;
 }
 
-// ─── Module state ─────────────────────────────────────────────────────────────
-
-let sheetsClient: sheets_v4.Sheets | null = null;
-const logsSheetEnsuredSet = new Set<string>(); // tracks which ssIds have been set up
-let disabledUntil = 0;
-let disableReason: string | null = null;
-
-const PERMISSION_BACKOFF_MS = 15 * 60 * 1000;
-const TRANSIENT_BACKOFF_MS = 60 * 1000;
-
-function extractGoogleError(err: unknown): {
-  status?: number;
-  code?: number;
-  message: string;
-} {
-  const maybe = err as {
-    status?: number;
-    code?: number;
-    message?: string;
-    response?: { status?: number; data?: { error?: { message?: string } } };
-    cause?: { message?: string; code?: number; status?: string };
-  };
-
-  const status = maybe?.status ?? maybe?.response?.status;
-  const code = maybe?.code ?? maybe?.cause?.code;
-  const message =
-    maybe?.cause?.message ??
-    maybe?.response?.data?.error?.message ??
-    maybe?.message ??
-    "Unknown Google Sheets error";
-
-  return { status, code, message };
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function getClient(): sheets_v4.Sheets | null {
-  if (sheetsClient) return sheetsClient;
-  const auth = getGoogleAuth();
-  if (!auth) return null;
-  sheetsClient = google.sheets({ version: "v4", auth });
-  return sheetsClient;
-}
-
-/** Format a Date as "YYYY-MM-DD HH:mm:ss" in GMT+8. */
-function formatTimestamp(date: Date): string {
-  return date.toLocaleString("zh-CN", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).replace(/\//g, "-");
-}
-
-/** Shorten connection ID to first 8 chars to keep cells readable. */
-function shortConn(id: string): string {
-  return id.length > 8 ? id.slice(0, 8) + "…" : id;
-}
-
-// ─── Sheet setup ──────────────────────────────────────────────────────────────
-
-/**
- * Ensure the "Logs" sheet exists. If not, create it and write the header row.
- * Result is cached so this only hits the API once per bot session.
- */
-async function ensureLogsSheet(client: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
-  if (logsSheetEnsuredSet.has(spreadsheetId)) return;
-
-  // Fetch all sheet metadata
-  const meta = await client.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets.properties.title",
-  });
-
-  const titles = (meta.data.sheets ?? []).map(
-    (s) => s.properties?.title ?? ""
-  );
-
-  if (!titles.includes(LOGS_SHEET_NAME)) {
-    // Create the Logs sheet
-    await client.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            addSheet: {
-              properties: {
-                title: LOGS_SHEET_NAME,
-                gridProperties: { frozenRowCount: 1 },
-              },
-            },
-          },
-        ],
-      },
-    });
-
-    // Write header row
-    await client.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${LOGS_SHEET_NAME}!A1:G1`,
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[
-          "时间",
-          "方向",
-          "客户ID",
-          "客户名",
-          "连接ID",
-          "消息内容",
-          "回复类型",
-        ]],
-      },
-    });
-
-    console.log(`[logger] ✅ Created "${LOGS_SHEET_NAME}" sheet with headers.`);
+export function buildCustomerName(
+  chatOrFirstName?: string | { first_name?: string; last_name?: string; username?: string },
+  lastName?: string,
+  username?: string
+): string {
+  if (chatOrFirstName && typeof chatOrFirstName === "object") {
+    const c = chatOrFirstName;
+    const full = [c.first_name, c.last_name].filter(Boolean).join(" ").trim();
+    return full || (c.username ? "@" + c.username : "Unknown");
   }
-
-  logsSheetEnsuredSet.add(spreadsheetId);
+  const full = [chatOrFirstName, lastName].filter(Boolean).join(" ").trim();
+  return full || (username ? "@" + username : "Unknown");
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Append one row to the Logs sheet.
- * This function is FIRE-AND-FORGET — call without await to avoid blocking.
- */
-export async function logMessage(entry: LogEntry, spreadsheetId: string): Promise<void> {
-  if (!spreadsheetId || !isGoogleConfigured()) return;
-  if (Date.now() < disabledUntil) return;
-
-  const client = getClient();
-  if (!client) return;
-
-  try {
-    await ensureLogsSheet(client, spreadsheetId);
-
-    const timestamp = formatTimestamp(new Date());
-    const row = [
-      timestamp,
-      entry.direction,
-      String(entry.customerId),
-      entry.customerName,
-      shortConn(entry.connectionId),
-      entry.text,
-      entry.replyType ?? "",
-    ];
-
-    await client.spreadsheets.values.append({
-      spreadsheetId,
-      range: `${LOGS_SHEET_NAME}!A:G`,
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [row] },
-    });
-
-    console.log(
-      `[logger] 📝 ${entry.direction}  customer=${entry.customerId}  "${entry.text.slice(0, 40)}"`
-    );
-  } catch (err) {
-    // Never let logging errors affect the bot
-    const details = extractGoogleError(err);
-
-    if (details.status === 403 || details.code === 403) {
-      disabledUntil = Date.now() + PERMISSION_BACKOFF_MS;
-      if (disableReason !== "permission") {
-        disableReason = "permission";
-        console.warn(
-          `[logger] ⚠️ Google Sheets permission denied (403). ` +
-          `Logging paused for ${Math.floor(PERMISSION_BACKOFF_MS / 60000)} min. ` +
-          `Share the spreadsheet with the service account as Editor.`
-        );
-      }
-      return;
-    }
-
-    disabledUntil = Date.now() + TRANSIENT_BACKOFF_MS;
-    if (disableReason !== "transient") {
-      disableReason = "transient";
-      console.warn(`[logger] ⚠️ Sheets logging temporarily unavailable: ${details.message}`);
-    }
-  }
-}
-
-/**
- * Build a display name from Telegram user/chat fields.
- * Falls back gracefully through: full name → username → chat id.
- */
-export function buildCustomerName(chat: {
-  first_name?: string;
-  last_name?: string;
-  username?: string;
-  id: number;
-}): string {
-  const parts = [chat.first_name, chat.last_name].filter(Boolean);
-  if (parts.length > 0) return parts.join(" ");
-  if (chat.username) return `@${chat.username}`;
-  return `id:${chat.id}`;
+export function logMessage(entry: LogEntry, ownerKey: string): void {
+  if (!process.env.DATABASE_URL || !ownerKey) return;
+  const userId = parseInt(ownerKey, 10);
+  if (isNaN(userId)) return;
+  pool.query(
+    `INSERT INTO logs(user_id, direction, customer_id, customer_name, connection_id, message, reply_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [userId, entry.direction, entry.customerId, entry.customerName,
+     entry.connectionId, entry.text, entry.replyType]
+  ).catch(err => console.warn("[logger] insert failed:", (err as Error).message));
 }

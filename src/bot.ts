@@ -12,6 +12,7 @@ import { registerOwnerReply, isHumanTakeover, clearAutoTakeover, isChatPaused,
 } from "./takeover.js";
 import { getOrProvisionUserSheet, isAdmin } from "./registry.js";
 import { getAdminPrompt, DEFAULT_SYSTEM_PROMPT } from "./adminPrompt.js";
+import { initDb } from "./db.js";
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -23,7 +24,7 @@ if (!BOT_TOKEN) {
 
 // DEFAULT_SYSTEM_PROMPT is the platform-level fallback.
 // Each admin overrides this via their own Prompts sheet.
-console.log("✅  Bot starting — per-admin prompts loaded from Sheets at runtime.");
+console.log("✅  Bot starting — per-admin prompts and keywords stored in PostgreSQL.");
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -832,7 +833,7 @@ async function startWithRetry(
         onStart: (info) => {
           console.log(`\n🚀  Bot @${info.username} is live!`);
           console.log(`    Model  : ${process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile"}`);
-          console.log(`    Sheets : ${isSheetsEnabled() ? "✅ Keyword lookup enabled" : "⚠️  Disabled (set GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SPREADSHEET_ID)"}`);
+          console.log(`    Sheets : ${isSheetsEnabled() ? "✅ PostgreSQL keyword lookup enabled" : "⚠️  Disabled (set DATABASE_URL)"}`);
           console.log(`    Takeover: per-message (active paused sessions: ${activeTakeoverCount()})`);
           console.log(
             `    Startup guard: ${IGNORE_OLD_UPDATES_ON_START ? "ON" : "OFF"} | ` +
@@ -878,10 +879,14 @@ async function startWithRetry(
 
 import { startServer } from "./server.js";
 
-// Start Express Mini App server (runs alongside the bot's long-polling)
-startServer();
-
-void startWithRetry();
+// Initialize PostgreSQL schema then start server and bot
+void initDb().then(() => {
+  startServer();
+  void startWithRetry();
+}).catch(err => {
+  console.error("[db] ❌ Failed to initialize database:", err);
+  process.exit(1);
+});
 
 /**
  * Generate a time-limited one-time login token for the keyword manager.
