@@ -162,7 +162,7 @@ export function startServer(): void {
       res.json({ rows });
     } catch (err) {
       console.error("[server] GET /api/keywords error:", err);
-      res.status(500).json({ error: "Failed to fetch keywords from Sheets" });
+      res.status(500).json({ error: "Failed to fetch keywords from Sheets", detail: (err as Error).message });
     }
   });
 
@@ -215,7 +215,7 @@ export function startServer(): void {
       res.json({ ok: true, saved: rows.length });
     } catch (err) {
       console.error("[server] POST /api/keywords error:", err);
-      res.status(500).json({ error: "Failed to save keywords to Sheets" });
+      res.status(500).json({ error: "Failed to save keywords to Sheets", detail: (err as Error).message });
     }
   });
 
@@ -246,7 +246,7 @@ export function startServer(): void {
       res.json({ prompt });
     } catch (err) {
       console.error("[server] GET /api/prompt error:", err);
-      res.status(500).json({ error: "Failed to fetch prompt" });
+      res.status(500).json({ error: "Failed to fetch prompt", detail: (err as Error).message });
     }
   });
 
@@ -282,7 +282,7 @@ export function startServer(): void {
       res.json({ ok: true });
     } catch (err) {
       console.error("[server] POST /api/prompt error:", err);
-      res.status(500).json({ error: "Failed to save prompt" });
+      res.status(500).json({ error: "Failed to save prompt", detail: (err as Error).message });
     }
   });
 
