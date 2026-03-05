@@ -118,10 +118,15 @@ export function startServer(): void {
     }
 
     const ssId  = await getOrProvisionUserSheet(userId, username, firstName).catch(() => null);
-    const ssUrl = ssId ? `https://docs.google.com/spreadsheets/d/${ssId}` : null;
 
+    if (!ssId) {
+      res.status(403).json({ error: `userId ${userId} 不在管理员白名单中，请联系平台运营者` });
+      return;
+    }
+
+    const ssUrl = `https://docs.google.com/spreadsheets/d/${ssId}`;
     const sessionToken = crypto.randomBytes(24).toString("hex");
-    if (ssId) sessions.set(sessionToken, { userId, ssId, expiresAt: Date.now() + SESSION_TTL_MS });
+    sessions.set(sessionToken, { userId, ssId, expiresAt: Date.now() + SESSION_TTL_MS });
 
     res.json({ userId, firstName, username, ssId, ssUrl, sessionToken });
   });
